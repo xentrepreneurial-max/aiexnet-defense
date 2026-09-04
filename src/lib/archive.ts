@@ -22,7 +22,7 @@ const DB_DIR = process.env.ARCHIVE_DIR || path.join(process.cwd(), "data");
 const DB_PATH = path.join(DB_DIR, "archive.db");
 
 /** How long to keep position history. Contact metadata is kept indefinitely. */
-const RETENTION_DAYS = Number(process.env.ARCHIVE_RETENTION_DAYS || 30);
+const RETENTION_DAYS = Number(process.env.ARCHIVE_RETENTION_DAYS || 7);
 
 /** Minimum movement before a new row is written, in metres. */
 const MIN_MOVE_M = 25;
