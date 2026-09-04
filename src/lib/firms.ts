@@ -11,6 +11,7 @@
 
 import { ThermalAnomaly } from "@/types/intelligence";
 import { describeSector } from "@/lib/regions";
+import { fetchText } from "@/lib/httpFetch";
 
 // west, south, east, north
 const AREA = "87.0,17.0,96.5,27.5";
@@ -70,66 +71,70 @@ function classifyRisk(frp: number, brightnessK: number, dayNight: string): Therm
 
 async function fetchProduct(mapKey: string, product: string): Promise<ThermalAnomaly[] | null> {
   const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${mapKey}/${product}/${AREA}/${DAY_RANGE}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { "User-Agent": "AIEXNET-Defense/2.0" },
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    const text = await res.text();
-    if (text.startsWith("Invalid") || text.includes("MAP_KEY")) return null;
 
-    const rows = parseCsv(text);
-    return rows
-      .map((r, idx): ThermalAnomaly | null => {
-        const lat = Number(r.latitude);
-        const lon = Number(r.longitude);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  // FIRMS is one of the hosts Node's built-in fetch cannot reach reliably, so
+  // this goes through the helper that falls back to node:https over IPv4.
+  const res = await fetchText(url, {
+    timeoutMs: 25_000,
+    headers: { "User-Agent": "AIEXNET-Defense/2.0" },
+  });
 
-        const brightness = Number(r.bright_ti4 ?? r.brightness ?? 0);
-        const frp = Number(r.frp ?? 0);
-        const acqDate = r.acq_date || "";
-        const acqTime = (r.acq_time || "0000").padStart(4, "0");
-        const iso = `${acqDate}T${acqTime.slice(0, 2)}:${acqTime.slice(2)}:00Z`;
-        const epoch = Date.parse(iso);
-        const dayNight = (r.daynight || "D").toUpperCase();
-
-        const instrument = (r.instrument || "").toUpperCase();
-        const satCode = (r.satellite || "").toUpperCase();
-        let satLabel: ThermalAnomaly["satellite"] = "VIIRS";
-        if (instrument === "MODIS") satLabel = "MODIS";
-        else if (satCode.includes("N20") || satCode === "1") satLabel = "VIIRS_NOAA20";
-        else if (satCode.includes("N21") || satCode === "2") satLabel = "VIIRS_NOAA21";
-
-        return {
-          id: `${product}-${lat.toFixed(4)}-${lon.toFixed(4)}-${acqDate}-${acqTime}-${idx}`,
-          latitude: lat,
-          longitude: lon,
-          brightness: Number(brightness.toFixed(1)),
-          confidence: confidenceToNumber(r.confidence || ""),
-          satellite: satLabel,
-          detectionTime: Number.isFinite(epoch) ? new Date(epoch).toISOString() : iso,
-          detectionEpoch: Number.isFinite(epoch) ? epoch : undefined,
-          areaDescription: describeSector(lat, lon),
-          riskType: classifyRisk(frp, brightness, dayNight),
-          frp: Number(frp.toFixed(1)),
-          scanKm: Number(r.scan ?? 0) || undefined,
-          trackKm: Number(r.track ?? 0) || undefined,
-          dayNight: dayNight === "N" ? "N" : "D",
-          dataSource: `NASA FIRMS / ${product}`,
-        };
-      })
-      .filter((x): x is ThermalAnomaly => x !== null);
-  } catch {
+  if (!res.ok) {
+    lastFetchError = res.error ?? `HTTP ${res.status}`;
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  const text = res.text;
+  if (text.startsWith("Invalid") || text.includes("Invalid MAP_KEY")) {
+    lastFetchError = "FIRMS rejected the MAP_KEY.";
+    return null;
+  }
+
+  const rows = parseCsv(text);
+  return rows
+    .map((r, idx): ThermalAnomaly | null => {
+      const lat = Number(r.latitude);
+      const lon = Number(r.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+      const brightness = Number(r.bright_ti4 ?? r.brightness ?? 0);
+      const frp = Number(r.frp ?? 0);
+      const acqDate = r.acq_date || "";
+      const acqTime = (r.acq_time || "0000").padStart(4, "0");
+      const iso = `${acqDate}T${acqTime.slice(0, 2)}:${acqTime.slice(2)}:00Z`;
+      const epoch = Date.parse(iso);
+      const dayNight = (r.daynight || "D").toUpperCase();
+
+      const instrument = (r.instrument || "").toUpperCase();
+      const satCode = (r.satellite || "").toUpperCase();
+      let satLabel: ThermalAnomaly["satellite"] = "VIIRS";
+      if (instrument === "MODIS") satLabel = "MODIS";
+      else if (satCode.includes("N20") || satCode === "1") satLabel = "VIIRS_NOAA20";
+      else if (satCode.includes("N21") || satCode === "2") satLabel = "VIIRS_NOAA21";
+
+      return {
+        id: `${product}-${lat.toFixed(4)}-${lon.toFixed(4)}-${acqDate}-${acqTime}-${idx}`,
+        latitude: lat,
+        longitude: lon,
+        brightness: Number(brightness.toFixed(1)),
+        confidence: confidenceToNumber(r.confidence || ""),
+        satellite: satLabel,
+        detectionTime: Number.isFinite(epoch) ? new Date(epoch).toISOString() : iso,
+        detectionEpoch: Number.isFinite(epoch) ? epoch : undefined,
+        areaDescription: describeSector(lat, lon),
+        riskType: classifyRisk(frp, brightness, dayNight),
+        frp: Number(frp.toFixed(1)),
+        scanKm: Number(r.scan ?? 0) || undefined,
+        trackKm: Number(r.track ?? 0) || undefined,
+        dayNight: dayNight === "N" ? "N" : "D",
+        dataSource: `NASA FIRMS / ${product}`,
+      };
+    })
+    .filter((x): x is ThermalAnomaly => x !== null);
 }
 
+/** Reason the most recent product fetch failed, surfaced in the feed status. */
+let lastFetchError: string | null = null;
 
 export interface FirmsResult {
   data: ThermalAnomaly[];
@@ -197,7 +202,7 @@ export async function getFirmsData(): Promise<FirmsResult> {
 
   const error =
     failed.length === PRODUCTS.length
-      ? "All FIRMS products failed — check that NASA_FIRMS_MAP_KEY is valid."
+      ? `All FIRMS products failed${lastFetchError ? `: ${lastFetchError}` : "."}`
       : failed.length > 0
       ? `Unavailable: ${failed.join(", ")}`
       : null;

@@ -29,6 +29,7 @@ import { VesselData } from "@/types/intelligence";
 const TOKEN_URL =
   "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token";
 const PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process";
+const CATALOG_URL = "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search";
 
 /** Sea is dark in VV; this scaling keeps hulls near saturation. */
 const EVALSCRIPT = `//VERSION=3
@@ -64,7 +65,13 @@ export interface DarkVesselResult {
   matchedMmsi: string | null;
   matchedName: string | null;
   matchDistanceM: number | null;
-  dark: boolean;
+  /**
+   * MATCHED       — an AIS report sits within the match radius.
+   * DARK          — AIS covered this area and time, and nothing was there.
+   * UNCORRELATED  — no AIS coverage for the acquisition time, so we cannot
+   *                 say anything about this target. Never call it dark.
+   */
+  status: "MATCHED" | "DARK" | "UNCORRELATED";
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +87,12 @@ export interface CfarOptions {
   thresholdSigma: number;
   /** Reject clusters smaller than this — single hot pixels are usually noise. */
   minClusterPixels: number;
+  /**
+   * Minimum target-to-clutter ratio. SAR speckle is multiplicative, so a
+   * Gaussian sigma test alone under-rejects it; requiring the pixel to be this
+   * many times the local background mean is the scene-independent guard.
+   */
+  minContrastRatio: number;
 }
 
 /**
@@ -95,7 +108,15 @@ export const DEFAULT_CFAR: CfarOptions = {
   backgroundRadius: 30, // ≈ 600 m of sea clutter
   guardRadius: 12, // ≈ 240 m, wider than any expected hull
   thresholdSigma: 5.0,
-  minClusterPixels: 2,
+  minClusterPixels: 3,
+  /**
+   * Ships sit well above 10 dB over sea clutter. Measured on an empty
+   * Bay of Bengal box, sea speckle peaked at 79 DN against a background of a
+   * few DN and produced 382 false detections under a sigma-only test; a
+   * ratio gate removes that population without touching real returns, which
+   * saturate this scaling.
+   */
+  minContrastRatio: 8.0,
 };
 
 /** Summed-area table, so any window sum is four lookups regardless of size. */
@@ -170,11 +191,190 @@ function boxCount(
  * of the window radius. That is what makes a guard band wide enough for large
  * vessels affordable.
  */
+/**
+ * Land mask derived from the scene itself.
+ *
+ * WHY: SAR ship detection over a coastal box is meaningless without one. Land
+ * is bright in SAR — every village, embankment and hill slope — so a CFAR run
+ * over a box containing coastline reports hundreds of "targets" that are
+ * simply the shore. A first run over the Chittagong approaches returned 202
+ * detections, essentially all of them land.
+ *
+ * HOW: open water has low, homogeneous backscatter; land is bright over large
+ * contiguous areas; a ship is bright but small. Smoothing at a scale far
+ * larger than any vessel therefore keeps land bright and washes ships out.
+ * The smoothed image is split into water and land with Otsu's threshold, the
+ * standard choice for this bimodal separation, and the land side is then
+ * buffered so harbour structures and surf on the shoreline are excluded too.
+ *
+ * The Copernicus DEM would give a surveyed mask instead, but the DEM
+ * collection is not authorised for this account (HTTP 403), so the mask is
+ * derived from the radar image and reported as approximate.
+ */
+export interface LandMaskResult {
+  mask: Uint8Array;
+  waterFraction: number;
+  threshold: number;
+  /** Otsu separability; below the bimodality floor the scene is all water. */
+  separability: number;
+  /** Backscatter gap between the two classes, in scaled digital numbers. */
+  classGap: number;
+  landDetected: boolean;
+  smoothWindowM: number;
+  bufferM: number;
+}
+
+interface OtsuResult {
+  threshold: number;
+  /** Otsu separability, between-class variance over total variance, 0..1. */
+  separability: number;
+  /** Mean of the darker class. */
+  meanLow: number;
+  /** Mean of the brighter class. */
+  meanHigh: number;
+}
+
+/** Otsu's method over a 256-bin histogram of the smoothed scene. */
+function otsuThreshold(values: Float32Array): OtsuResult {
+  const hist = new Array(256).fill(0);
+  for (let i = 0; i < values.length; i++) {
+    const v = Math.max(0, Math.min(255, Math.round(values[i])));
+    hist[v]++;
+  }
+  const total = values.length;
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t];
+
+  const mean = sum / total;
+  let totalVar = 0;
+  for (let t = 0; t < 256; t++) totalVar += hist[t] * (t - mean) * (t - mean);
+  totalVar /= total;
+
+  let sumB = 0;
+  let wB = 0;
+  let best = 0;
+  let bestVar = -1;
+  let bestLow = 0;
+  let bestHigh = 0;
+
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const between = (wB / total) * (wF / total) * (mB - mF) * (mB - mF);
+    if (between > bestVar) {
+      bestVar = between;
+      best = t;
+      bestLow = mB;
+      bestHigh = mF;
+    }
+  }
+
+  return {
+    threshold: best,
+    separability: totalVar > 0 ? bestVar / totalVar : 0,
+    meanLow: bestLow,
+    meanHigh: bestHigh,
+  };
+}
+
+export function buildLandMask(
+  gray: Float32Array,
+  width: number,
+  height: number,
+  metresPerPixel: number,
+  smoothWindowM = 2000,
+  bufferM = 300
+): LandMaskResult {
+  const ii = integralImage(gray, width, height, false);
+
+  // Half-width of the smoothing window, in pixels, floored so tiny rasters
+  // still get some smoothing.
+  const r = Math.max(2, Math.round(smoothWindowM / 2 / Math.max(metresPerPixel, 1)));
+
+  const smoothed = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const sum = boxSum(ii, width, height, x - r, y - r, x + r, y + r);
+      const n = boxCount(width, height, x - r, y - r, x + r, y + r);
+      smoothed[y * width + x] = n > 0 ? sum / n : 0;
+    }
+  }
+
+  const otsu = otsuThreshold(smoothed);
+
+  /**
+   * Otsu always returns a split, even when there is nothing to split. Over an
+   * all-water box it divides calm sea into "darker sea" and "brighter sea" and
+   * calls the second one land — an open-ocean box came back as 1.3% water
+   * before this guard existed.
+   *
+   * A genuine land/water scene is strongly bimodal AND the two classes sit far
+   * apart in backscatter. Require both before accepting any land at all.
+   */
+  const MIN_SEPARABILITY = 0.62;
+  const MIN_CLASS_GAP = 18; // digital numbers in the 0-255 scaled backscatter
+  const classGap = otsu.meanHigh - otsu.meanLow;
+  const bimodal = otsu.separability >= MIN_SEPARABILITY && classGap >= MIN_CLASS_GAP;
+
+  const raw = new Uint8Array(width * height);
+  if (bimodal) {
+    for (let i = 0; i < raw.length; i++) raw[i] = smoothed[i] > otsu.threshold ? 1 : 0;
+  }
+
+  if (!bimodal) {
+    return {
+      mask: raw, // all zero: nothing is masked, the whole box is water
+      waterFraction: 1,
+      threshold: otsu.threshold,
+      separability: Number(otsu.separability.toFixed(3)),
+      classGap: Number(classGap.toFixed(1)),
+      landDetected: false,
+      smoothWindowM,
+      bufferM,
+    };
+  }
+
+  // Buffer the land outward so shoreline clutter is excluded as well.
+  const br = Math.max(1, Math.round(bufferM / Math.max(metresPerPixel, 1)));
+  const maskFloat = new Float32Array(raw.length);
+  for (let i = 0; i < raw.length; i++) maskFloat[i] = raw[i];
+  const iiMask = integralImage(maskFloat, width, height, false);
+
+  const mask = new Uint8Array(width * height);
+  let water = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const near = boxSum(iiMask, width, height, x - br, y - br, x + br, y + br);
+      const isLand = near > 0 ? 1 : 0;
+      mask[y * width + x] = isLand;
+      if (!isLand) water++;
+    }
+  }
+
+  return {
+    mask,
+    waterFraction: water / (width * height),
+    threshold: otsu.threshold,
+    separability: Number(otsu.separability.toFixed(3)),
+    classGap: Number(classGap.toFixed(1)),
+    landDetected: true,
+    smoothWindowM,
+    bufferM,
+  };
+}
+
 export function cfarDetect(
   gray: Float32Array,
   width: number,
   height: number,
-  opts: CfarOptions = DEFAULT_CFAR
+  opts: CfarOptions = DEFAULT_CFAR,
+  /** Optional land mask: 1 means excluded from detection. */
+  exclude?: Uint8Array
 ): Uint8Array {
   const { backgroundRadius: R, guardRadius: G, thresholdSigma: K } = opts;
   const mask = new Uint8Array(width * height);
@@ -184,6 +384,8 @@ export function cfarDetect(
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
+      if (exclude && exclude[y * width + x]) continue;
+
       const outerSum = boxSum(ii, width, height, x - R, y - R, x + R, y + R);
       const outerSq = boxSum(ii2, width, height, x - R, y - R, x + R, y + R);
       const outerN = boxCount(width, height, x - R, y - R, x + R, y + R);
@@ -202,7 +404,12 @@ export function cfarDetect(
       // Uniform background gives sd 0; require a real floor so flat areas do
       // not produce detections from rounding alone.
       const threshold = mean + K * Math.max(sd, 1.0);
-      if (gray[y * width + x] > threshold) mask[y * width + x] = 1;
+      const centre = gray[y * width + x];
+
+      // Both tests must pass: above local statistics, and a genuine
+      // target-to-clutter ratio rather than a speckle spike.
+      const contrastOk = centre >= Math.max(mean, 0.5) * opts.minContrastRatio;
+      if (centre > threshold && contrastOk) mask[y * width + x] = 1;
     }
   }
 
@@ -328,6 +535,12 @@ export function clusterDetections(
 export function correlateWithAis(
   targets: SarTarget[],
   vessels: VesselData[],
+  /**
+   * Whether AIS actually covered this area at the acquisition time. Without
+   * coverage a radar target says nothing about concealment, so the result is
+   * UNCORRELATED rather than DARK.
+   */
+  aisCovered: boolean,
   radiusM = 800
 ): DarkVesselResult[] {
   return targets.map((target) => {
@@ -343,7 +556,7 @@ export function correlateWithAis(
       matchedMmsi: matched ? matched.v.mmsi : null,
       matchedName: matched ? matched.v.name : null,
       matchDistanceM: best ? Math.round(best.d) : null,
-      dark: !matched,
+      status: matched ? "MATCHED" : aisCovered ? "DARK" : "UNCORRELATED",
     };
   });
 }
@@ -393,9 +606,63 @@ export interface SarRequest {
   /** minLon, minLat, maxLon, maxLat */
   bbox: [number, number, number, number];
   /** How far back to look for an acquisition. */
+  /** How far back to accept an acquisition. Sentinel-1 revisits every few days. */
   lookbackHours: number;
   /** Raster size; larger sees smaller vessels but costs more processing. */
   size: number;
+}
+
+export interface SarScene {
+  /** ISO timestamp of the radar acquisition itself. */
+  datetime: string;
+  id: string;
+  orbitState: string | null;
+  polarizations: string[] | null;
+}
+
+/**
+ * Newest Sentinel-1 acquisition covering the box.
+ *
+ * Knowing WHEN the radar looked is not optional: correlating a five-day-old
+ * image against this minute's AIS would call every ship in it "dark" simply
+ * because it has since sailed away.
+ */
+export async function findLatestScene(
+  bbox: [number, number, number, number],
+  lookbackHours: number
+): Promise<SarScene | null> {
+  const token = await getAccessToken();
+  if (!token) throw new Error("CDSE credentials not configured");
+
+  const to = new Date();
+  const from = new Date(to.getTime() - lookbackHours * 3600_000);
+
+  const res = await fetch(CATALOG_URL, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      collections: ["sentinel-1-grd"],
+      bbox,
+      datetime: `${from.toISOString()}/${to.toISOString()}`,
+      limit: 10,
+    }),
+  });
+  if (!res.ok) throw new Error(`Catalog search failed: HTTP ${res.status}`);
+
+  const json = await res.json();
+  const features: any[] = json?.features ?? [];
+  if (features.length === 0) return null;
+
+  features.sort((a, b) =>
+    String(b.properties?.datetime).localeCompare(String(a.properties?.datetime))
+  );
+  const f = features[0];
+  return {
+    datetime: String(f.properties?.datetime),
+    id: String(f.id ?? ""),
+    orbitState: f.properties?.["sat:orbit_state"] ?? null,
+    polarizations: f.properties?.polarizations ?? f.properties?.["sar:polarizations"] ?? null,
+  };
 }
 
 export interface SarScanResult {
@@ -403,15 +670,40 @@ export interface SarScanResult {
   raster: { width: number; height: number };
   bbox: [number, number, number, number];
   timeRange: { from: string; to: string };
+  /** The acquisition this result actually came from. */
+  scene: SarScene | null;
   metresPerPixel: number;
+  /** Share of the box that was actually searched, after masking land. */
+  waterFraction: number;
+  landMask: {
+    method: string;
+    landDetected: boolean;
+    otsuThreshold: number;
+    separability: number;
+    classGap: number;
+    smoothWindowM: number;
+    shorelineBufferM: number;
+  };
+  /** Populated when the request geometry makes the result unreliable. */
+  warnings: string[];
 }
 
 export async function scanSar(req: SarRequest): Promise<SarScanResult> {
   const token = await getAccessToken();
   if (!token) throw new Error("CDSE credentials not configured");
 
-  const to = new Date();
-  const from = new Date(to.getTime() - req.lookbackHours * 3600_000);
+  // Find the actual acquisition first, then pin the image request to it so we
+  // read one pass rather than a blend, and know its timestamp.
+  const scene = await findLatestScene(req.bbox, req.lookbackHours);
+  if (!scene) {
+    throw new Error(
+      `No Sentinel-1 acquisition covers this box in the last ${req.lookbackHours} h. Sentinel-1 revisits every few days — widen the lookback.`
+    );
+  }
+
+  const sceneMs = Date.parse(scene.datetime);
+  const from = new Date(sceneMs - 10 * 60_000);
+  const to = new Date(sceneMs + 10 * 60_000);
 
   const payload = {
     input: {
@@ -426,6 +718,9 @@ export async function scanSar(req: SarRequest): Promise<SarScanResult> {
             timeRange: { from: from.toISOString(), to: to.toISOString() },
             acquisitionMode: "IW",
             polarization: "DV",
+            // Take the latest pass rather than blending several into one
+            // image, which would place ships from different days side by side.
+            mosaickingOrder: "mostRecent",
           },
           processing: { backCoeff: "SIGMA0_ELLIPSOID", orthorectify: true },
         },
@@ -457,18 +752,49 @@ export async function scanSar(req: SarRequest): Promise<SarScanResult> {
   const img = decodePng(buffer);
   const gray = toGrayscale(img);
 
-  const mask = cfarDetect(gray, img.width, img.height);
-  const targets = clusterDetections(mask, gray, img.width, img.height, req.bbox);
-
   const [minLon, minLat, maxLon, maxLat] = req.bbox;
   const spanKm = haversineKm((minLat + maxLat) / 2, minLon, (minLat + maxLat) / 2, maxLon);
+  const metresPerPixel = (spanKm * 1000) / img.width;
+
+  const warnings: string[] = [];
+  // Sentinel-1 IW GRD is 10 m native. Beyond roughly 30 m per pixel a vessel
+  // is only a pixel or two and detection becomes unreliable, so say so
+  // instead of returning confident-looking noise.
+  if (metresPerPixel > 30) {
+    warnings.push(
+      `Ground sample distance is ${metresPerPixel.toFixed(0)} m/px. Sentinel-1 resolves about 10 m, so vessels under roughly ${Math.round(metresPerPixel * 3)} m may be missed. Use a smaller box or a larger raster.`
+    );
+  }
+
+  const land = buildLandMask(gray, img.width, img.height, metresPerPixel);
+  if (land.waterFraction < 0.15) {
+    warnings.push(
+      `Only ${(land.waterFraction * 100).toFixed(0)}% of this box is open water. Ship detection is meaningful over water, so most of the area was not searched.`
+    );
+  }
+
+  const mask = cfarDetect(gray, img.width, img.height, DEFAULT_CFAR, land.mask);
+  const targets = clusterDetections(mask, gray, img.width, img.height, req.bbox);
 
   return {
     targets,
     raster: { width: img.width, height: img.height },
     bbox: req.bbox,
     timeRange: { from: from.toISOString(), to: to.toISOString() },
-    metresPerPixel: Number(((spanKm * 1000) / img.width).toFixed(1)),
+    scene,
+    metresPerPixel: Number(metresPerPixel.toFixed(1)),
+    waterFraction: Number(land.waterFraction.toFixed(3)),
+    landMask: {
+      method:
+        "Derived from the radar scene: large-scale smoothing plus an Otsu split, then a shoreline buffer. Approximate — the surveyed Copernicus DEM mask is not authorised for this account.",
+      landDetected: land.landDetected,
+      otsuThreshold: land.threshold,
+      separability: land.separability,
+      classGap: land.classGap,
+      smoothWindowM: land.smoothWindowM,
+      shorelineBufferM: land.bufferM,
+    },
+    warnings,
   };
 }
 

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { detectAisGaps, detectReappearances } from "@/lib/darkVessels";
 import { scanSar, correlateWithAis, sarConfigured } from "@/lib/sar";
 import { ensureAisRunning, getVessels, getAisStatus } from "@/lib/aisStore";
+import { pictureAt } from "@/lib/archive";
+import { VesselData } from "@/types/intelligence";
 import { ensureRecorderRunning } from "@/lib/recorder";
 
 export const dynamic = "force-dynamic";
@@ -87,21 +89,59 @@ export async function GET(req: NextRequest) {
           lookbackHours: Math.min(240, Math.max(1, Number(p.get("hours") || 24))),
           size: Math.min(2048, Math.max(256, Number(p.get("size") || 1024))),
         });
-        const correlated = correlateWithAis(scan.targets, getVessels());
+        /**
+         * Correlate against AIS as it was AT THE ACQUISITION, not now. A
+         * Sentinel-1 pass can be days old; matching it to this minute's AIS
+         * would label every ship in the image "dark" purely because it has
+         * since sailed on.
+         */
+        const acqMs = scan.scene ? Date.parse(scan.scene.datetime) : NaN;
+        let aisAtAcquisition: VesselData[] = getVessels();
+        let aisCovered = false;
+        let correlationNote: string | null = null;
+
+        if (Number.isFinite(acqMs)) {
+          const archived = pictureAt(acqMs, 1800).sea;
+          if (archived.length > 0) {
+            aisCovered = true;
+            aisAtAcquisition = archived.map((r) => ({
+              mmsi: r.id,
+              name: r.description || `MMSI ${r.id}`,
+              type: "OTHER" as const,
+              flag: r.flag ?? "Unknown",
+              latitude: r.latitude,
+              longitude: r.longitude,
+              speed: r.speed ?? 0,
+              heading: r.track ?? 0,
+              destination: "NOT RECORDED",
+              status: "UNKNOWN" as const,
+              threatLevel: "NORMAL" as const,
+            }));
+            correlationNote = `Correlated against ${archived.length} archived AIS report(s) within 30 minutes of the ${scan.scene?.datetime} acquisition.`;
+          } else {
+            correlationNote = `The archive holds no AIS for ${scan.scene?.datetime}, when this radar image was taken, so these targets cannot be judged. They are reported as UNCORRELATED, not dark. Once recording has been running across a Sentinel-1 pass, this box can be judged properly.`;
+          }
+        }
+
+        const correlated = correlateWithAis(scan.targets, aisAtAcquisition, aisCovered);
         sar = {
           linkState: "LIVE",
-          message:
-            aisStatus.linkState === "NO_KEY"
-              ? "Radar targets found, but AIS is not configured — nothing to correlate against, so every target reads as unmatched."
-              : null,
+          message: correlationNote,
           detections: correlated,
           meta: {
             raster: scan.raster,
             bbox: scan.bbox,
             timeRange: scan.timeRange,
             metresPerPixel: scan.metresPerPixel,
+            waterFraction: scan.waterFraction,
+            landMask: scan.landMask,
+            warnings: scan.warnings,
+            scene: scan.scene,
+            aisCovered,
             targetCount: scan.targets.length,
-            darkCount: correlated.filter((c) => c.dark).length,
+            matchedCount: correlated.filter((c) => c.status === "MATCHED").length,
+            darkCount: correlated.filter((c) => c.status === "DARK").length,
+            uncorrelatedCount: correlated.filter((c) => c.status === "UNCORRELATED").length,
           },
         };
       } catch (err: any) {
