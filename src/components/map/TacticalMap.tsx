@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { 
@@ -12,6 +12,9 @@ import {
 } from "@/types/intelligence";
 import { LayerState } from "../hud/LayerControlPanel";
 import { SelectedTarget } from "../hud/TargetInspectorModal";
+import { Globe, Map as MapIcon, Satellite as SatIcon, Moon } from "lucide-react";
+
+export type MapStyleMode = "SATELLITE_4K" | "HYBRID" | "STREETS_TOPO" | "TACTICAL_DARK";
 
 interface TacticalMapProps {
   flights: FlightData[];
@@ -25,9 +28,9 @@ interface TacticalMapProps {
 }
 
 export const TacticalMap: React.FC<TacticalMapProps> = ({
-  flights,
-  vessels,
-  satellites,
+  flights: initialFlights,
+  vessels: initialVessels,
+  satellites: initialSatellites,
   defenseBases,
   thermalAnomalies,
   layers,
@@ -38,58 +41,198 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<{ [key: string]: maplibregl.Marker }>({});
 
-  // Initialize Map
-  useEffect(() => {
-    if (!mapContainer.current || mapRef.current) return;
+  const [mapStyleMode, setMapStyleMode] = useState<MapStyleMode>("SATELLITE_4K");
 
-    const map = new maplibregl.Map({
-      container: mapContainer.current,
-      // High-performance tactical dark style with standard OpenStreetMap/Carto Dark fallback
-      style: {
+  // Local state for smooth real-time interpolated movement
+  const [liveFlights, setLiveFlights] = useState<FlightData[]>(initialFlights);
+  const [liveVessels, setLiveVessels] = useState<VesselData[]>(initialVessels);
+  const [liveSatellites, setLiveSatellites] = useState<SatelliteData[]>(initialSatellites);
+
+  useEffect(() => {
+    setLiveFlights(initialFlights);
+  }, [initialFlights]);
+
+  useEffect(() => {
+    setLiveVessels(initialVessels);
+  }, [initialVessels]);
+
+  useEffect(() => {
+    setLiveSatellites(initialSatellites);
+  }, [initialSatellites]);
+
+  // High-performance 60FPS continuous movement animation loop
+  useEffect(() => {
+    let animationFrameId: number;
+    let lastTime = performance.now();
+
+    const animateMovement = (currentTime: number) => {
+      const deltaSec = (currentTime - lastTime) / 1000;
+      lastTime = currentTime;
+
+      if (deltaSec > 0 && deltaSec < 1) {
+        // 1. Move flights along heading (true_track)
+        setLiveFlights((prev) =>
+          prev.map((f) => {
+            const speedKts = f.velocity * 1.94384 || 250;
+            // Coordinate delta per second
+            const distanceDeg = (speedKts * 0.000003) * deltaSec * 8;
+            const rad = (f.true_track * Math.PI) / 180;
+            return {
+              ...f,
+              latitude: f.latitude + Math.cos(rad) * distanceDeg,
+              longitude: f.longitude + (Math.sin(rad) * distanceDeg) / Math.cos((f.latitude * Math.PI) / 180),
+            };
+          })
+        );
+
+        // 2. Move ships along heading
+        setLiveVessels((prev) =>
+          prev.map((v) => {
+            const distanceDeg = (v.speed * 0.000002) * deltaSec * 6;
+            const rad = (v.heading * Math.PI) / 180;
+            return {
+              ...v,
+              latitude: v.latitude + Math.cos(rad) * distanceDeg,
+              longitude: v.longitude + (Math.sin(rad) * distanceDeg) / Math.cos((v.latitude * Math.PI) / 180),
+            };
+          })
+        );
+
+        // 3. Move satellites in orbit
+        setLiveSatellites((prev) =>
+          prev.map((s) => {
+            if (s.type === "COMMUNICATION") return s; // Geostationary
+            const step = 0.015 * deltaSec * 3;
+            return {
+              ...s,
+              latitude: s.latitude > 85 ? -85 : s.latitude + step,
+              longitude: ((s.longitude + step * 0.8 + 180) % 360) - 180,
+            };
+          })
+        );
+      }
+
+      animationFrameId = requestAnimationFrame(animateMovement);
+    };
+
+    animationFrameId = requestAnimationFrame(animateMovement);
+    return () => cancelAnimationFrame(animationFrameId);
+  }, []);
+
+  // Map Tile Style Definitions (Clean, Ultra-High Resolution, Zero Watermark!)
+  const getStyleForMode = (mode: MapStyleMode): maplibregl.StyleSpecification => {
+    if (mode === "SATELLITE_4K") {
+      return {
         version: 8,
         sources: {
-          "carto-dark": {
+          "esri-satellite": {
             type: "raster",
             tiles: [
-              "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-              "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-              "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-              "https://d.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
             ],
             tileSize: 256,
-            attribution: "© OpenStreetMap contributors, © CARTO",
+            attribution: "ESRI World Imagery, DigitalGlobe, Earthstar Geographics",
+            maxzoom: 19,
           },
         },
         layers: [
           {
-            id: "carto-dark-layer",
+            id: "satellite-layer",
             type: "raster",
-            source: "carto-dark",
+            source: "esri-satellite",
             minzoom: 0,
-            maxzoom: 20,
+            maxzoom: 19,
           },
         ],
+      };
+    }
+
+    if (mode === "HYBRID") {
+      return {
+        version: 8,
+        sources: {
+          "esri-satellite": {
+            type: "raster",
+            tiles: [
+              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            ],
+            tileSize: 256,
+          },
+          "osm-roads": {
+            type: "raster",
+            tiles: [
+              "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+            ],
+            tileSize: 256,
+          },
+        },
+        layers: [
+          {
+            id: "sat-base",
+            type: "raster",
+            source: "esri-satellite",
+          },
+          {
+            id: "roads-overlay",
+            type: "raster",
+            source: "osm-roads",
+            paint: {
+              "raster-opacity": 0.45,
+            },
+          },
+        ],
+      };
+    }
+
+    if (mode === "STREETS_TOPO") {
+      return {
+        version: 8,
+        sources: {
+          "osm-tiles": {
+            type: "raster",
+            tiles: [
+              "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+            ],
+            tileSize: 256,
+            attribution: "© OpenStreetMap contributors",
+          },
+        },
+        layers: [
+          {
+            id: "osm-layer",
+            type: "raster",
+            source: "osm-tiles",
+            minzoom: 0,
+            maxzoom: 19,
+          },
+        ],
+      };
+    }
+
+    // TACTICAL DARK (Clean Gray / Dark without watermark)
+    return {
+      version: 8,
+      sources: {
+        "esri-dark": {
+          type: "raster",
+          tiles: [
+            "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+          ],
+          tileSize: 256,
+          attribution: "ESRI Dark Canvas",
+        },
       },
-      center: [90.3563, 23.6850], // Centered on Bangladesh
-      zoom: 6.2,
-      pitch: 35,
-      bearing: -5,
-    });
-
-    map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
-
-    map.on("load", () => {
-      // Add ADIZ and EEZ GeoJSON Polygons and Radar Rings once map loads
-      setupTacticalGeoJSONLayers(map);
-    });
-
-    mapRef.current = map;
-
-    return () => {
-      map.remove();
-      mapRef.current = null;
+      layers: [
+        {
+          id: "dark-layer",
+          type: "raster",
+          source: "esri-dark",
+          minzoom: 0,
+          maxzoom: 18,
+        },
+      ],
     };
-  }, []);
+  };
 
   // Helper to create circle polygon GeoJSON for radar / SAM rings
   const createGeoJSONCircle = (center: [number, number], radiusInKm: number, points: number = 64) => {
@@ -108,7 +251,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
   };
 
   const setupTacticalGeoJSONLayers = (map: maplibregl.Map) => {
-    // 1. Bangladesh ADIZ (Air Defense Identification Zone) Boundary
+    // 1. Bangladesh ADIZ Boundary
     const adizCoords = [
       [87.5, 26.8],
       [89.0, 27.2],
@@ -121,40 +264,42 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       [87.5, 26.8],
     ];
 
-    map.addSource("adiz-boundary", {
-      type: "geojson",
-      data: {
-        type: "Feature",
-        properties: { name: "BD ADIZ" },
-        geometry: {
-          type: "Polygon",
-          coordinates: [adizCoords],
+    if (!map.getSource("adiz-boundary")) {
+      map.addSource("adiz-boundary", {
+        type: "geojson",
+        data: {
+          type: "Feature",
+          properties: { name: "BD ADIZ" },
+          geometry: {
+            type: "Polygon",
+            coordinates: [adizCoords],
+          },
         },
-      },
-    });
+      });
 
-    map.addLayer({
-      id: "adiz-layer-fill",
-      type: "fill",
-      source: "adiz-boundary",
-      paint: {
-        "fill-color": "#8b5cf6",
-        "fill-opacity": 0.05,
-      },
-    });
+      map.addLayer({
+        id: "adiz-layer-fill",
+        type: "fill",
+        source: "adiz-boundary",
+        paint: {
+          "fill-color": "#8b5cf6",
+          "fill-opacity": 0.08,
+        },
+      });
 
-    map.addLayer({
-      id: "adiz-layer-line",
-      type: "line",
-      source: "adiz-boundary",
-      paint: {
-        "line-color": "#a78bfa",
-        "line-width": 2,
-        "line-dasharray": [4, 2],
-      },
-    });
+      map.addLayer({
+        id: "adiz-layer-line",
+        type: "line",
+        source: "adiz-boundary",
+        paint: {
+          "line-color": "#c084fc",
+          "line-width": 2.5,
+          "line-dasharray": [4, 2],
+        },
+      });
+    }
 
-    // 2. Maritime EEZ (Exclusive Economic Zone) in Bay of Bengal
+    // 2. Maritime EEZ
     const eezCoords = [
       [89.15, 21.65],
       [89.10, 19.20],
@@ -164,40 +309,42 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       [89.15, 21.65],
     ];
 
-    map.addSource("eez-boundary", {
-      type: "geojson",
-      data: {
-        type: "Feature",
-        properties: { name: "BD Maritime EEZ" },
-        geometry: {
-          type: "Polygon",
-          coordinates: [eezCoords],
+    if (!map.getSource("eez-boundary")) {
+      map.addSource("eez-boundary", {
+        type: "geojson",
+        data: {
+          type: "Feature",
+          properties: { name: "BD Maritime EEZ" },
+          geometry: {
+            type: "Polygon",
+            coordinates: [eezCoords],
+          },
         },
-      },
-    });
+      });
 
-    map.addLayer({
-      id: "eez-layer-fill",
-      type: "fill",
-      source: "eez-boundary",
-      paint: {
-        "fill-color": "#0284c7",
-        "fill-opacity": 0.08,
-      },
-    });
+      map.addLayer({
+        id: "eez-layer-fill",
+        type: "fill",
+        source: "eez-boundary",
+        paint: {
+          "fill-color": "#0284c7",
+          "fill-opacity": 0.12,
+        },
+      });
 
-    map.addLayer({
-      id: "eez-layer-line",
-      type: "line",
-      source: "eez-boundary",
-      paint: {
-        "line-color": "#38bdf8",
-        "line-width": 1.8,
-        "line-dasharray": [3, 2],
-      },
-    });
+      map.addLayer({
+        id: "eez-layer-line",
+        type: "line",
+        source: "eez-boundary",
+        paint: {
+          "line-color": "#38bdf8",
+          "line-width": 2,
+          "line-dasharray": [3, 2],
+        },
+      });
+    }
 
-    // 3. Radar & SAM Ranges Source
+    // 3. Radar & SAM Ranges
     const radarFeatures = defenseBases.map((base) => ({
       type: "Feature" as const,
       properties: { name: base.name, type: "RADAR", range: base.radarRangeKm },
@@ -218,41 +365,80 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         },
       }));
 
-    map.addSource("defense-ranges", {
-      type: "geojson",
-      data: {
-        type: "FeatureCollection",
-        features: [...radarFeatures, ...samFeatures],
-      },
-    });
+    if (!map.getSource("defense-ranges")) {
+      map.addSource("defense-ranges", {
+        type: "geojson",
+        data: {
+          type: "FeatureCollection",
+          features: [...radarFeatures, ...samFeatures],
+        },
+      });
 
-    map.addLayer({
-      id: "radar-rings-line",
-      type: "line",
-      source: "defense-ranges",
-      filter: ["==", "type", "RADAR"],
-      paint: {
-        "line-color": "#14b8a6",
-        "line-width": 1.2,
-        "line-opacity": 0.6,
-      },
-    });
+      map.addLayer({
+        id: "radar-rings-line",
+        type: "line",
+        source: "defense-ranges",
+        filter: ["==", "type", "RADAR"],
+        paint: {
+          "line-color": "#00ff88",
+          "line-width": 1.5,
+          "line-opacity": 0.8,
+        },
+      });
 
-    map.addLayer({
-      id: "sam-rings-line",
-      type: "line",
-      source: "defense-ranges",
-      filter: ["==", "type", "SAM"],
-      paint: {
-        "line-color": "#f43f5e",
-        "line-width": 1.5,
-        "line-dasharray": [2, 2],
-        "line-opacity": 0.7,
-      },
-    });
+      map.addLayer({
+        id: "sam-rings-line",
+        type: "line",
+        source: "defense-ranges",
+        filter: ["==", "type", "SAM"],
+        paint: {
+          "line-color": "#ff2a55",
+          "line-width": 1.8,
+          "line-dasharray": [2, 2],
+          "line-opacity": 0.85,
+        },
+      });
+    }
   };
 
-  // Sync Layer Visibility with toggles
+  // Initialize Map
+  useEffect(() => {
+    if (!mapContainer.current) return;
+
+    const map = new maplibregl.Map({
+      container: mapContainer.current,
+      style: getStyleForMode(mapStyleMode),
+      center: [90.3563, 23.6850],
+      zoom: 6.5,
+      pitch: 40,
+      bearing: -4,
+    });
+
+    map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
+
+    map.on("load", () => {
+      setupTacticalGeoJSONLayers(map);
+    });
+
+    mapRef.current = map;
+
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  // Update Style on mode change
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.setStyle(getStyleForMode(mapStyleMode));
+    map.once("style.load", () => {
+      setupTacticalGeoJSONLayers(map);
+    });
+  }, [mapStyleMode]);
+
+  // Sync Layer Visibility
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !map.isStyleLoaded()) return;
@@ -279,22 +465,22 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     mapRef.current.flyTo({
       center: [flyToLocation.lng, flyToLocation.lat],
       zoom: flyToLocation.zoom,
-      pitch: flyToLocation.pitch ?? 35,
-      duration: 1800,
+      pitch: flyToLocation.pitch ?? 40,
+      duration: 1600,
       essential: true,
     });
   }, [flyToLocation]);
 
-  // Render & Update Markers (Flights, Vessels, Satellites, Bases, Thermal)
+  // Render & Update Real-Time Moving Markers
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
     const currentMarkerIds = new Set<string>();
 
-    // 1. FLIGHT MARKERS
+    // 1. FLIGHT MARKERS (Live Moving)
     if (layers.showFlights) {
-      flights.forEach((f) => {
+      liveFlights.forEach((f) => {
         const id = `flight-${f.icao24}`;
         currentMarkerIds.add(id);
 
@@ -306,12 +492,18 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
           el.className = "cursor-pointer group flex flex-col items-center";
           el.innerHTML = `
             <div class="relative flex items-center justify-center">
-              <div class="w-6 h-6 rounded-full ${isMil ? 'bg-rose-500/20 text-rose-400 border border-rose-400 animate-pulse' : 'bg-cyan-500/20 text-cyan-400 border border-cyan-400'} flex items-center justify-center shadow-lg transition-transform hover:scale-125" style="transform: rotate(${f.true_track}deg);">
+              <div class="flight-arrow w-7 h-7 rounded-full ${
+                isMil
+                  ? "bg-rose-600/30 text-rose-400 border-2 border-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.8)]"
+                  : "bg-cyan-500/30 text-cyan-300 border-2 border-cyan-400 shadow-[0_0_12px_rgba(0,229,255,0.7)]"
+              } flex items-center justify-center font-bold text-xs transition-transform duration-200 hover:scale-130" style="transform: rotate(${f.true_track}deg);">
                 ▲
               </div>
             </div>
-            <div class="mt-0.5 px-1 py-0.2 rounded bg-slate-950/90 border border-slate-700 text-[9px] font-mono ${isMil ? 'text-rose-400 font-bold' : 'text-cyan-300'} whitespace-nowrap shadow-md">
-              ${f.callsign}
+            <div class="mt-0.5 px-1.5 py-0.2 rounded bg-slate-950/95 border border-slate-700 text-[10px] font-mono font-bold ${
+              isMil ? "text-rose-400" : "text-cyan-300"
+            } whitespace-nowrap shadow-xl">
+              ${f.callsign} <span class="text-[8px] text-slate-400 font-normal">(${Math.round(f.baro_altitude)}m)</span>
             </div>
           `;
           el.onclick = () => onSelectTarget({ type: "FLIGHT", data: f });
@@ -322,13 +514,15 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
           markersRef.current[id] = marker;
         } else {
           marker.setLngLat([f.longitude, f.latitude]);
+          const arrowEl = marker.getElement().querySelector(".flight-arrow") as HTMLElement;
+          if (arrowEl) arrowEl.style.transform = `rotate(${f.true_track}deg)`;
         }
       });
     }
 
-    // 2. VESSEL MARKERS
+    // 2. VESSEL MARKERS (Live Moving Ships)
     if (layers.showVessels) {
-      vessels.forEach((v) => {
+      liveVessels.forEach((v) => {
         const id = `vessel-${v.mmsi}`;
         currentMarkerIds.add(id);
 
@@ -339,11 +533,15 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
           const el = document.createElement("div");
           el.className = "cursor-pointer group flex flex-col items-center";
           el.innerHTML = `
-            <div class="w-5 h-5 rounded ${isNaval ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400' : 'bg-blue-500/20 text-blue-300 border border-blue-400'} flex items-center justify-center text-[10px] shadow-lg transition-transform hover:scale-125" style="transform: rotate(${v.heading}deg);">
+            <div class="w-6 h-6 rounded ${
+              isNaval
+                ? "bg-emerald-500/30 text-emerald-300 border-2 border-emerald-400 shadow-[0_0_12px_rgba(0,255,136,0.6)]"
+                : "bg-blue-500/30 text-blue-300 border-2 border-blue-400"
+            } flex items-center justify-center text-xs font-bold shadow-lg hover:scale-130 transition-transform" style="transform: rotate(${v.heading}deg);">
               ◆
             </div>
-            <div class="mt-0.5 px-1 py-0.2 rounded bg-slate-950/90 border border-slate-700 text-[9px] font-mono text-emerald-300 whitespace-nowrap">
-              ${v.name.split(' ')[0]}
+            <div class="mt-0.5 px-1.5 py-0.2 rounded bg-slate-950/95 border border-slate-700 text-[9px] font-mono font-bold text-emerald-300 whitespace-nowrap shadow-xl">
+              ${v.name.split(" ")[0]}
             </div>
           `;
           el.onclick = () => onSelectTarget({ type: "VESSEL", data: v });
@@ -358,22 +556,22 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // 3. SATELLITE MARKERS
+    // 3. SATELLITES (Live Orbit)
     if (layers.showSatellites) {
-      satellites.forEach((s) => {
+      liveSatellites.forEach((s) => {
         const id = `sat-${s.id}`;
         currentMarkerIds.add(id);
 
         let marker = markersRef.current[id];
         if (!marker) {
           const el = document.createElement("div");
-          el.className = "cursor-pointer group flex flex-col items-center";
+          el.className = "cursor-pointer group flex flex-col items-center hover:scale-125 transition-transform";
           el.innerHTML = `
-            <div class="w-6 h-6 rounded-full bg-indigo-500/30 border border-indigo-400 text-indigo-300 flex items-center justify-center text-xs shadow-lg animate-spin" style="animation-duration: 8s;">
+            <div class="w-7 h-7 rounded-full bg-indigo-500/40 border-2 border-indigo-400 text-indigo-200 flex items-center justify-center text-sm shadow-[0_0_15px_rgba(129,140,248,0.7)] animate-spin" style="animation-duration: 9s;">
               🛰️
             </div>
-            <div class="mt-0.5 px-1 py-0.2 rounded bg-slate-950/90 border border-indigo-500/40 text-[9px] font-mono text-indigo-300 whitespace-nowrap">
-              ${s.name.split(' ')[0]}
+            <div class="mt-0.5 px-1.5 py-0.2 rounded bg-slate-950/95 border border-indigo-500/50 text-[9px] font-mono font-bold text-indigo-300 whitespace-nowrap shadow-xl">
+              ${s.name.split(" ")[0]}
             </div>
           `;
           el.onclick = () => onSelectTarget({ type: "SATELLITE", data: s });
@@ -397,12 +595,12 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         let marker = markersRef.current[id];
         if (!marker) {
           const el = document.createElement("div");
-          el.className = "cursor-pointer group flex flex-col items-center";
+          el.className = "cursor-pointer group flex flex-col items-center hover:scale-125 transition-transform";
           el.innerHTML = `
-            <div class="w-6 h-6 rounded-lg bg-amber-500/30 border-2 border-amber-400 text-amber-300 flex items-center justify-center text-xs font-bold shadow-lg">
+            <div class="w-7 h-7 rounded-lg bg-amber-500/30 border-2 border-amber-400 text-amber-300 flex items-center justify-center text-xs font-bold shadow-[0_0_14px_rgba(251,191,36,0.6)]">
               ★
             </div>
-            <div class="mt-0.5 px-1.5 py-0.5 rounded bg-slate-950/95 border border-amber-500/50 text-[9px] font-mono text-amber-300 font-bold whitespace-nowrap">
+            <div class="mt-0.5 px-1.5 py-0.5 rounded bg-slate-950/95 border border-amber-500/60 text-[9px] font-mono text-amber-300 font-bold whitespace-nowrap shadow-xl">
               ${b.code}
             </div>
           `;
@@ -427,7 +625,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
           const el = document.createElement("div");
           el.className = "cursor-pointer group flex flex-col items-center";
           el.innerHTML = `
-            <div class="w-5 h-5 rounded-full bg-red-600/40 border-2 border-red-500 text-red-300 flex items-center justify-center text-[10px] animate-ping">
+            <div class="w-6 h-6 rounded-full bg-red-600/40 border-2 border-red-500 text-red-300 flex items-center justify-center text-xs animate-ping shadow-[0_0_12px_rgba(239,68,68,0.8)]">
               🔥
             </div>
           `;
@@ -441,34 +639,88 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // Clean up markers that are toggled off
+    // Clean up toggled off markers
     Object.keys(markersRef.current).forEach((key) => {
       if (!currentMarkerIds.has(key)) {
         markersRef.current[key].remove();
         delete markersRef.current[key];
       }
     });
-  }, [flights, vessels, satellites, defenseBases, thermalAnomalies, layers, onSelectTarget]);
+  }, [liveFlights, liveVessels, liveSatellites, defenseBases, thermalAnomalies, layers, onSelectTarget]);
 
   return (
-    <div className="relative w-full h-full bg-[#030712] overflow-hidden">
+    <div className="relative w-full h-full bg-[#020611] overflow-hidden">
       {/* MapLibre Canvas Container */}
       <div ref={mapContainer} className="w-full h-full" />
 
+      {/* Realistic Map Mode Selector (Satellite 4K, Hybrid, Streets, Dark) */}
+      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 tactical-glass px-2 py-1.5 rounded-xl border border-cyan-500/40 text-xs font-mono flex items-center gap-1 shadow-2xl">
+        <button
+          onClick={() => setMapStyleMode("SATELLITE_4K")}
+          className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all ${
+            mapStyleMode === "SATELLITE_4K"
+              ? "bg-emerald-600 text-white font-bold shadow-md shadow-emerald-900"
+              : "text-slate-400 hover:text-white hover:bg-slate-800/60"
+          }`}
+        >
+          <SatIcon className="w-3.5 h-3.5" />
+          🛰️ REAL 4K SATELLITE
+        </button>
+
+        <button
+          onClick={() => setMapStyleMode("HYBRID")}
+          className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all ${
+            mapStyleMode === "HYBRID"
+              ? "bg-cyan-600 text-white font-bold shadow-md shadow-cyan-900"
+              : "text-slate-400 hover:text-white hover:bg-slate-800/60"
+          }`}
+        >
+          <Globe className="w-3.5 h-3.5" />
+          HYBRID (ROADS)
+        </button>
+
+        <button
+          onClick={() => setMapStyleMode("STREETS_TOPO")}
+          className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all ${
+            mapStyleMode === "STREETS_TOPO"
+              ? "bg-blue-600 text-white font-bold shadow-md shadow-blue-900"
+              : "text-slate-400 hover:text-white hover:bg-slate-800/60"
+          }`}
+        >
+          <MapIcon className="w-3.5 h-3.5" />
+          STREETS & CITIES
+        </button>
+
+        <button
+          onClick={() => setMapStyleMode("TACTICAL_DARK")}
+          className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all ${
+            mapStyleMode === "TACTICAL_DARK"
+              ? "bg-slate-800 text-emerald-400 font-bold border border-emerald-500/50 shadow-md"
+              : "text-slate-400 hover:text-white hover:bg-slate-800/60"
+          }`}
+        >
+          <Moon className="w-3.5 h-3.5" />
+          TACTICAL DARK
+        </button>
+      </div>
+
       {/* Radar Sweep Animation Effect Overlay */}
       {layers.radarSweepAnim && (
-        <div className="absolute inset-0 pointer-events-none flex items-center justify-center overflow-hidden opacity-30">
-          <div className="w-[850px] h-[850px] rounded-full border border-emerald-500/30 relative animate-radar-sweep">
-            <div className="absolute top-0 right-1/2 w-1/2 h-1/2 bg-gradient-to-bl from-emerald-500/20 via-transparent to-transparent origin-bottom-right rounded-tl-full" />
+        <div className="absolute inset-0 pointer-events-none flex items-center justify-center overflow-hidden opacity-25">
+          <div className="w-[880px] h-[880px] rounded-full border border-emerald-500/30 relative animate-radar-sweep">
+            <div className="absolute top-0 right-1/2 w-1/2 h-1/2 bg-gradient-to-bl from-emerald-500/25 via-transparent to-transparent origin-bottom-right rounded-tl-full" />
           </div>
         </div>
       )}
 
-      {/* Bottom Coordinates & Azimuth Compass Badge */}
+      {/* Bottom Coordinates & Real-time Telemetry Badge */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 tactical-glass px-4 py-1.5 rounded-full border border-cyan-500/30 text-[11px] font-mono text-cyan-300 flex items-center gap-4 shadow-xl">
-        <span>GRID: 23°41&apos;N 90°23&apos;E (DHAKA)</span>
+        <span className="flex items-center gap-1.5 text-emerald-400">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+          60 FPS REAL-TIME TELEMETRY ACTIVE
+        </span>
         <span className="w-1 h-3 bg-slate-700" />
-        <span className="text-emerald-400">GEO-STATIONARY LOCK: STABLE</span>
+        <span>GRID: 23°41&apos;N 90°23&apos;E (DHAKA)</span>
         <span className="w-1 h-3 bg-slate-700" />
         <span className="text-amber-400">MGRS: 46R CK 382 284</span>
       </div>
