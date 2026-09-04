@@ -26,6 +26,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
+# Create persistent data directory for SQLite archive.db
+RUN mkdir -p /app/data && chown -R nextjs:nodejs /app/data
+
 # Automatically leverage output traces to reduce image size
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
@@ -36,5 +39,8 @@ EXPOSE 3000
 
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
+ENV ARCHIVE_DIR="/app/data"
+
+VOLUME ["/app/data"]
 
 CMD ["node", "server.js"]
