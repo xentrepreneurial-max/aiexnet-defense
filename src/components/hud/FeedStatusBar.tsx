@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronUp,
   KeyRound,
+  Rocket,
 } from "lucide-react";
 import { FeedStatus } from "@/types/intelligence";
 
@@ -22,6 +23,7 @@ const FEEDS: Array<{ id: string; label: string; Icon: React.ElementType }> = [
   { id: "SEA", label: "SEA / AIS", Icon: Ship },
   { id: "SPACE", label: "SPACE / TLE", Icon: Satellite },
   { id: "THERMAL", label: "THERMAL / FIRMS", Icon: Flame },
+  { id: "UAV", label: "UAV / MAVLINK", Icon: Rocket },
   { id: "ALERTS", label: "THREAT DERIV.", Icon: Siren },
 ];
 

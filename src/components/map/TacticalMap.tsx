@@ -27,15 +27,50 @@ import { Globe, Map as MapIcon, Satellite as SatIcon, Moon, Crosshair, Compass, 
 
 export type MapStyleMode = "GOOGLE_SAT_HD" | "ESRI_SAT_4K" | "HYBRID_ROADS" | "STREETS_TOPO" | "TACTICAL_DARK";
 
+export interface MissionOverlay {
+  waypoints: Array<{
+    latitude: number;
+    longitude: number;
+    altitudeM: number;
+    action: string;
+    label?: string;
+  }>;
+  /** Geofence ring as [lon, lat] pairs. */
+  geofenceRing: Array<[number, number]> | null;
+  /** Conflicting live contacts, so the operator sees them on the route. */
+  conflicts: Array<{ latitude: number; longitude: number; severity: string; callsign: string }>;
+}
+
 interface TacticalMapProps {
   flights: FlightData[];
   vessels: VesselData[];
   satellites: SatelliteData[];
   defenseBases: DefenseBase[];
   thermalAnomalies: ThermalAnomaly[];
+  drones?: DroneMarker[];
+  mission?: MissionOverlay | null;
+  /** Set while the operator is placing waypoints. */
+  planningMode?: boolean;
+  onMapClick?: (lngLat: { lng: number; lat: number }) => void;
+  /** Current view bounds, so area-based sweeps can target what is on screen. */
+  onViewportChange?: (bbox: [number, number, number, number]) => void;
   layers: LayerState;
   onSelectTarget: (target: SelectedTarget) => void;
   flyToLocation: { lng: number; lat: number; zoom: number; pitch?: number } | null;
+}
+
+export interface DroneMarker {
+  vehicleId: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  headingDeg: number;
+  altitudeRelM: number;
+  groundSpeedMs: number;
+  batteryPercent: number | null;
+  flightMode: string | null;
+  linkState: "LIVE" | "STALE" | "LOST";
+  history?: Array<[number, number]>;
 }
 
 export const TacticalMap: React.FC<TacticalMapProps> = ({
@@ -44,6 +79,11 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
   satellites: initialSatellites,
   defenseBases,
   thermalAnomalies,
+  drones = [],
+  mission = null,
+  planningMode = false,
+  onMapClick,
+  onViewportChange,
   layers,
   onSelectTarget,
   flyToLocation,
@@ -91,6 +131,32 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
   const satrecCache = useRef<Record<string, satellite.SatRec>>({});
   const thermalRef = useRef<ThermalAnomaly[]>(thermalAnomalies);
   const onSelectTargetRef = useRef(onSelectTarget);
+  const onMapClickRef = useRef(onMapClick);
+
+  const onViewportChangeRef = useRef(onViewportChange);
+  const planningModeRef = useRef(planningMode);
+
+  useEffect(() => {
+    planningModeRef.current = planningMode;
+  }, [planningMode]);
+
+  /**
+   * While placing waypoints, a click on a contact should drop a point rather
+   * than open its inspector — otherwise every click near traffic hijacks the
+   * planning gesture.
+   */
+  const selectTarget = (target: SelectedTarget) => {
+    if (planningModeRef.current) return;
+    onSelectTargetRef.current(target);
+  };
+
+  useEffect(() => {
+    onMapClickRef.current = onMapClick;
+  }, [onMapClick]);
+
+  useEffect(() => {
+    onViewportChangeRef.current = onViewportChange;
+  }, [onViewportChange]);
 
   useEffect(() => {
     thermalRef.current = thermalAnomalies;
@@ -607,7 +673,67 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // 7. Radar & SAM Ranges
+    // 7. Mission overlay: geofence ring, planned route, drone trails.
+    if (!map.getSource("mission-geofence")) {
+      map.addSource("mission-geofence", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      map.addLayer({
+        id: "mission-geofence-fill",
+        type: "fill",
+        source: "mission-geofence",
+        paint: { "fill-color": "#f59e0b", "fill-opacity": 0.05 },
+      });
+      map.addLayer({
+        id: "mission-geofence-line",
+        type: "line",
+        source: "mission-geofence",
+        paint: {
+          "line-color": "#fbbf24",
+          "line-width": 2,
+          "line-dasharray": [6, 3],
+          "line-opacity": 0.75,
+        },
+      });
+    }
+
+    if (!map.getSource("mission-route")) {
+      map.addSource("mission-route", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      map.addLayer({
+        id: "mission-route-casing",
+        type: "line",
+        source: "mission-route",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#0f172a", "line-width": 6, "line-opacity": 0.8 },
+      });
+      map.addLayer({
+        id: "mission-route-line",
+        type: "line",
+        source: "mission-route",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#22d3ee", "line-width": 2.5 },
+      });
+    }
+
+    if (!map.getSource("drone-trails")) {
+      map.addSource("drone-trails", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      map.addLayer({
+        id: "drone-trails-line",
+        type: "line",
+        source: "drone-trails",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#a78bfa", "line-width": 2, "line-opacity": 0.7 },
+      });
+    }
+
+    // 8. Radar & SAM Ranges
     const radarFeatures = defenseBases.map((base) => ({
       type: "Feature" as const,
       properties: { name: base.name, type: "RADAR", range: base.radarRangeKm },
@@ -698,11 +824,13 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       };
 
       bind("vessel-points-core", (props) => {
+        if (planningModeRef.current) return;
         const v = observedVessels.current.find((x) => x.mmsi === props.mmsi);
         if (v) onSelectTargetRef.current({ type: "VESSEL", data: v });
       });
 
       bind("thermal-points-core", (props) => {
+        if (planningModeRef.current) return;
         const th = thermalRef.current.find((x) => x.id === props.id);
         if (th) onSelectTargetRef.current({ type: "THERMAL", data: th });
       });
@@ -711,6 +839,16 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     map.on("load", () => {
       setupTacticalGeoJSONLayers(map);
       bindLayerInteractions();
+    });
+
+    map.on("click", (e) => {
+      // Only the empty map surface adds a waypoint; clicking a contact should
+      // still open the inspector rather than dropping a point on top of it.
+      const hits = map.queryRenderedFeatures(e.point, {
+        layers: ["vessel-points-core", "thermal-points-core"].filter((id) => map.getLayer(id)),
+      });
+      if (hits.length > 0) return;
+      onMapClickRef.current?.({ lng: e.lngLat.lng, lat: e.lngLat.lat });
     });
 
     /**
@@ -741,6 +879,14 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       else if (center.lat > 24.5 && center.lng < 89.5) sectorName = "RANGPUR / NORTHERN SECTOR";
       else if (center.lat < 23.0 && center.lng < 90.0) sectorName = "KHULNA / MONGLA COASTAL SECTOR";
       else if (center.lat >= 23.0 && center.lat <= 24.5) sectorName = "DHAKA CENTRAL DEFENSE CORRIDOR";
+
+      const b = map.getBounds();
+      onViewportChangeRef.current?.([
+        b.getWest(),
+        b.getSouth(),
+        b.getEast(),
+        b.getNorth(),
+      ]);
 
       setCameraTelemetry({
         lng: center.lng,
@@ -881,7 +1027,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
           const el = document.createElement("div");
           el.className = "cursor-pointer group flex flex-col items-center";
           el.innerHTML = markup;
-          el.onclick = () => onSelectTarget({ type: "FLIGHT", data: f });
+          el.onclick = () => selectTarget({ type: "FLIGHT", data: f });
           marker = new maplibregl.Marker({ element: el })
             .setLngLat([f.longitude, f.latitude])
             .addTo(map);
@@ -892,7 +1038,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
           const arrowEl = el.querySelector(".flight-arrow") as HTMLElement | null;
           if (arrowEl) arrowEl.style.transform = `rotate(${f.true_track}deg)`;
           // Keep the click handler bound to the latest observation.
-          el.onclick = () => onSelectTarget({ type: "FLIGHT", data: f });
+          el.onclick = () => selectTarget({ type: "FLIGHT", data: f });
         }
 
         // A track we can no longer project is shown faded, never hidden.
@@ -922,7 +1068,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
               ${s.name.split(" ")[0]}
             </div>
           `;
-          el.onclick = () => onSelectTarget({ type: "SATELLITE", data: s });
+          el.onclick = () => selectTarget({ type: "SATELLITE", data: s });
 
           marker = new maplibregl.Marker({ element: el })
             .setLngLat([s.longitude, s.latitude])
@@ -951,13 +1097,176 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
               ${b.code}
             </div>
           `;
-          el.onclick = () => onSelectTarget({ type: "BASE", data: b });
+          el.onclick = () => selectTarget({ type: "BASE", data: b });
 
           marker = new maplibregl.Marker({ element: el })
             .setLngLat([b.longitude, b.latitude])
             .addTo(map);
           markersRef.current[id] = marker;
         }
+      });
+    }
+
+    // Live UAV telemetry. Small fleet, so DOM markers keep the rich label.
+    drones.forEach((d) => {
+      const id = `drone-${d.vehicleId}`;
+      currentMarkerIds.add(id);
+
+      const tone =
+        d.linkState === "LOST"
+          ? "bg-slate-700/40 border-slate-500 text-slate-300"
+          : d.linkState === "STALE"
+          ? "bg-amber-600/30 border-amber-400 text-amber-200"
+          : "bg-violet-600/35 border-violet-300 text-violet-100";
+
+      const battery = d.batteryPercent != null ? `${Math.round(d.batteryPercent)}%` : "--";
+      const markup = `
+        <div class="relative flex items-center justify-center">
+          <div class="drone-icon w-8 h-8 rounded-lg ${tone} border-2 flex items-center justify-center text-[13px] font-bold shadow-[0_0_16px_rgba(167,139,250,0.7)]" style="transform: rotate(${d.headingDeg}deg);">
+            ✈
+          </div>
+        </div>
+        <div class="contact-label mt-0.5 px-1.5 py-0.5 rounded bg-slate-950/95 border border-violet-500/50 text-[10px] font-mono font-bold text-violet-200 whitespace-nowrap shadow-xl leading-tight text-center">
+          ${d.name}
+          <div class="contact-sublabel text-[8px] text-slate-400 font-normal">
+            ${Math.round(d.altitudeRelM)}m · ${Math.round(d.groundSpeedMs)}m/s · ${battery} · ${d.flightMode ?? "--"}
+          </div>
+        </div>
+      `;
+
+      let marker = markersRef.current[id];
+      if (!marker) {
+        const el = document.createElement("div");
+        el.className = "cursor-pointer flex flex-col items-center";
+        el.innerHTML = markup;
+        marker = new maplibregl.Marker({ element: el })
+          .setLngLat([d.longitude, d.latitude])
+          .addTo(map);
+        markersRef.current[id] = marker;
+      } else {
+        marker.setLngLat([d.longitude, d.latitude]);
+        const icon = marker.getElement().querySelector(".drone-icon") as HTMLElement | null;
+        if (icon) icon.style.transform = `rotate(${d.headingDeg}deg)`;
+      }
+      marker.getElement().style.opacity = d.linkState === "LOST" ? "0.45" : "1";
+      marker.getElement().title =
+        d.linkState === "LOST"
+          ? "Telemetry link lost — position is last known"
+          : `${d.name} · ${d.flightMode ?? "mode unknown"}`;
+    });
+
+    // Planned mission waypoints.
+    if (mission) {
+      mission.waypoints.forEach((w, i) => {
+        const id = `wp-${i}`;
+        currentMarkerIds.add(id);
+        const isTerminal = w.action === "RTL" || w.action === "LAND";
+        const badge =
+          w.action === "TAKEOFF" ? "▲" : isTerminal ? "⏻" : w.action === "LOITER" ? "◉" : String(i);
+
+        const markup = `
+          <div class="w-6 h-6 rounded-full ${
+            w.action === "TAKEOFF"
+              ? "bg-emerald-500/40 border-emerald-300 text-emerald-100"
+              : isTerminal
+              ? "bg-rose-500/40 border-rose-300 text-rose-100"
+              : "bg-cyan-500/40 border-cyan-300 text-cyan-50"
+          } border-2 flex items-center justify-center text-[10px] font-bold shadow-lg">${badge}</div>
+          <div class="contact-sublabel mt-0.5 px-1 rounded bg-slate-950/95 border border-slate-700 text-[8px] font-mono text-slate-300 whitespace-nowrap">
+            ${w.label ?? w.action} · ${Math.round(w.altitudeM)}m
+          </div>
+        `;
+
+        let marker = markersRef.current[id];
+        if (!marker) {
+          const el = document.createElement("div");
+          el.className = "flex flex-col items-center pointer-events-none";
+          el.innerHTML = markup;
+          marker = new maplibregl.Marker({ element: el })
+            .setLngLat([w.longitude, w.latitude])
+            .addTo(map);
+          markersRef.current[id] = marker;
+        } else {
+          marker.setLngLat([w.longitude, w.latitude]);
+          marker.getElement().innerHTML = markup;
+        }
+      });
+
+      mission.conflicts.forEach((c, i) => {
+        const id = `conflict-${i}`;
+        currentMarkerIds.add(id);
+        const markup = `
+          <div class="w-7 h-7 rounded-full border-2 ${
+            c.severity === "WARNING"
+              ? "border-red-400 bg-red-600/40 text-red-100"
+              : "border-amber-400 bg-amber-600/30 text-amber-100"
+          } flex items-center justify-center text-[11px] font-bold animate-pulse">!</div>
+          <div class="contact-sublabel mt-0.5 px-1 rounded bg-slate-950/95 border border-red-600/50 text-[8px] font-mono text-red-200 whitespace-nowrap">${c.callsign}</div>
+        `;
+        let marker = markersRef.current[id];
+        if (!marker) {
+          const el = document.createElement("div");
+          el.className = "flex flex-col items-center pointer-events-none";
+          el.innerHTML = markup;
+          marker = new maplibregl.Marker({ element: el })
+            .setLngLat([c.longitude, c.latitude])
+            .addTo(map);
+          markersRef.current[id] = marker;
+        } else {
+          marker.setLngLat([c.longitude, c.latitude]);
+          marker.getElement().innerHTML = markup;
+        }
+      });
+    }
+
+    // Mission route line and geofence ring.
+    const routeSource = map.getSource("mission-route") as maplibregl.GeoJSONSource | undefined;
+    if (routeSource) {
+      const coords = (mission?.waypoints ?? []).map(
+        (w) => [w.longitude, w.latitude] as [number, number]
+      );
+      routeSource.setData({
+        type: "FeatureCollection",
+        features:
+          coords.length > 1
+            ? [
+                {
+                  type: "Feature",
+                  properties: {},
+                  geometry: { type: "LineString", coordinates: coords },
+                },
+              ]
+            : [],
+      });
+    }
+
+    const fenceSource = map.getSource("mission-geofence") as maplibregl.GeoJSONSource | undefined;
+    if (fenceSource) {
+      fenceSource.setData({
+        type: "FeatureCollection",
+        features: mission?.geofenceRing
+          ? [
+              {
+                type: "Feature",
+                properties: {},
+                geometry: { type: "Polygon", coordinates: [mission.geofenceRing] },
+              },
+            ]
+          : [],
+      });
+    }
+
+    const droneTrailSource = map.getSource("drone-trails") as maplibregl.GeoJSONSource | undefined;
+    if (droneTrailSource) {
+      droneTrailSource.setData({
+        type: "FeatureCollection",
+        features: drones
+          .filter((d) => (d.history?.length ?? 0) > 1)
+          .map((d) => ({
+            type: "Feature" as const,
+            properties: { id: d.vehicleId },
+            geometry: { type: "LineString" as const, coordinates: d.history! },
+          })),
       });
     }
 
@@ -1042,11 +1351,30 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         delete markersRef.current[key];
       }
     });
-  }, [liveFlights, liveVessels, liveSatellites, defenseBases, thermalAnomalies, layers, onSelectTarget]);
+  }, [
+    liveFlights,
+    liveVessels,
+    liveSatellites,
+    defenseBases,
+    thermalAnomalies,
+    drones,
+    mission,
+    layers,
+    onSelectTarget,
+  ]);
 
   return (
     <div className="relative w-full h-full bg-[#020611] overflow-hidden">
-      <div ref={mapContainer} className="w-full h-full" />
+      <div
+        ref={mapContainer}
+        className={`w-full h-full ${planningMode ? "cursor-crosshair" : ""}`}
+      />
+
+      {planningMode && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-30 tactical-glass px-3 py-1.5 rounded-lg border border-cyan-400/60 text-[11px] font-mono text-cyan-200 shadow-xl">
+          MISSION PLANNING — click the map to place a waypoint
+        </div>
+      )}
 
       {/* Realistic Map Mode Selector */}
       <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 tactical-glass px-2 py-1.5 rounded-xl border border-cyan-500/40 text-xs font-mono flex items-center gap-1 shadow-2xl">

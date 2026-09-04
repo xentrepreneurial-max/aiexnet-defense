@@ -34,7 +34,7 @@ export const TargetInspectorModal: React.FC<TargetInspectorModalProps> = ({ targ
   if (!target) return null;
 
   return (
-    <div className="fixed bottom-6 right-6 z-40 w-96 tactical-glass rounded-xl border border-cyan-400/50 p-4 shadow-2xl shadow-cyan-950/70 font-mono select-none animate-in fade-in slide-in-from-bottom-4 duration-200">
+    <div className="w-80 tactical-glass rounded-xl border border-cyan-400/50 p-3.5 shadow-2xl shadow-cyan-950/70 font-mono select-none flex-shrink-0">
       {/* Top Banner with Type Icon and Close Button */}
       <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-700">
         <div className="flex items-center gap-2">
