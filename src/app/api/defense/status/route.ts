@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { ensurePollerRunning, getFeedDiagnostics } from "@/lib/adsbStore";
 import { ensureAisRunning, getAisStatus } from "@/lib/aisStore";
-import { tleCacheStatus } from "@/lib/tle";
+import { tleCacheStatus, refreshTles } from "@/lib/tle";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -10,6 +10,12 @@ export const revalidate = 0;
 export async function GET() {
   ensurePollerRunning();
   ensureAisRunning();
+
+  // Element sets are cached for six hours, so this is a no-op after the first
+  // call. Without it a fresh server reported SPACE as OFFLINE until something
+  // else happened to touch the satellite route, which lit a red HUD light for
+  // a feed that was perfectly healthy.
+  await refreshTles();
 
   const air = getFeedDiagnostics();
   const sea = getAisStatus();
