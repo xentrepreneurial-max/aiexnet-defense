@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: #040810;
+    --foreground: #d1fae5;
+  }
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* CRT Screen Scanline Effect */
+.crt-overlay {
+  background: linear-gradient(
+    rgba(18, 16, 16, 0) 50%, 
+    rgba(0, 0, 0, 0.25) 50%
+  ), linear-gradient(
+    90deg,
+    rgba(255, 0, 0, 0.03),
+    rgba(0, 255, 0, 0.01),
+    rgba(0, 0, 255, 0.03)
+  );
+  background-size: 100% 3px, 6px 100%;
+  pointer-events: none;
+}
+
+/* Radar Grid Background */
+.radar-grid-bg {
+  background-image: 
+    radial-gradient(circle, rgba(0, 255, 136, 0.1) 1px, transparent 1px),
+    linear-gradient(to right, rgba(0, 255, 136, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 255, 136, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* Glowing Tactical Borders */
+.tactical-glass {
+  background: rgba(8, 18, 33, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(0, 229, 255, 0.25);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.6), inset 0 0 12px rgba(0, 229, 255, 0.05);
+}
+
+.tactical-glass-green {
+  background: rgba(6, 22, 16, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(0, 255, 136, 0.3);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.6), inset 0 0 12px rgba(0, 255, 136, 0.05);
+}
+
+.tactical-glass-red {
+  background: rgba(28, 8, 14, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 42, 85, 0.4);
+  box-shadow: 0 8px 32px 0 rgba(255, 42, 85, 0.2), inset 0 0 12px rgba(255, 42, 85, 0.08);
+}
+
+/* Custom Tactical Scrollbars */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: #050b14;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e385b;
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #00ff88;
+}
+
+/* MapLibre Canvas Custom Styling */
+.maplibregl-canvas-container {
+  filter: contrast(1.15) brightness(0.95);
+}
+
+.maplibregl-ctrl-attrib {
+  display: none !important;
+}
