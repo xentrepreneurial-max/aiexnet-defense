@@ -12,9 +12,9 @@ import {
 } from "@/types/intelligence";
 import { LayerState } from "../hud/LayerControlPanel";
 import { SelectedTarget } from "../hud/TargetInspectorModal";
-import { Globe, Map as MapIcon, Satellite as SatIcon, Moon } from "lucide-react";
+import { Globe, Map as MapIcon, Satellite as SatIcon, Moon, Crosshair, Compass, Eye, ShieldAlert } from "lucide-react";
 
-export type MapStyleMode = "SATELLITE_4K" | "HYBRID" | "STREETS_TOPO" | "TACTICAL_DARK";
+export type MapStyleMode = "GOOGLE_SAT_HD" | "ESRI_SAT_4K" | "HYBRID_ROADS" | "STREETS_TOPO" | "TACTICAL_DARK";
 
 interface TacticalMapProps {
   flights: FlightData[];
@@ -41,7 +41,18 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<{ [key: string]: maplibregl.Marker }>({});
 
-  const [mapStyleMode, setMapStyleMode] = useState<MapStyleMode>("SATELLITE_4K");
+  const [mapStyleMode, setMapStyleMode] = useState<MapStyleMode>("GOOGLE_SAT_HD");
+
+  // Camera Live Telemetry State
+  const [cameraTelemetry, setCameraTelemetry] = useState({
+    lng: 90.3563,
+    lat: 23.6850,
+    zoom: 6.5,
+    altitudeMeters: 450000,
+    pitch: 40,
+    bearing: -4,
+    sector: "BANGLADESH NATIONAL AIRSPACE",
+  });
 
   // Local state for smooth real-time interpolated movement
   const [liveFlights, setLiveFlights] = useState<FlightData[]>(initialFlights);
@@ -74,7 +85,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         setLiveFlights((prev) =>
           prev.map((f) => {
             const speedKts = f.velocity * 1.94384 || 250;
-            // Coordinate delta per second
             const distanceDeg = (speedKts * 0.000003) * deltaSec * 8;
             const rad = (f.true_track * Math.PI) / 180;
             return {
@@ -101,7 +111,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         // 3. Move satellites in orbit
         setLiveSatellites((prev) =>
           prev.map((s) => {
-            if (s.type === "COMMUNICATION") return s; // Geostationary
+            if (s.type === "COMMUNICATION") return s;
             const step = 0.015 * deltaSec * 3;
             return {
               ...s,
@@ -119,9 +129,67 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     return () => cancelAnimationFrame(animationFrameId);
   }, []);
 
-  // Map Tile Style Definitions (Clean, Ultra-High Resolution, Zero Watermark!)
+  // Map Tile Style Definitions with seamless Overzooming (No white tiles!)
   const getStyleForMode = (mode: MapStyleMode): maplibregl.StyleSpecification => {
-    if (mode === "SATELLITE_4K") {
+    if (mode === "GOOGLE_SAT_HD") {
+      return {
+        version: 8,
+        sources: {
+          "google-sat": {
+            type: "raster",
+            tiles: [
+              "https://mt0.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+              "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+              "https://mt2.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+              "https://mt3.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+            ],
+            tileSize: 256,
+            maxzoom: 20,
+            attribution: "Google Satellite HD, Sub-Meter Ground Recon",
+          },
+        },
+        layers: [
+          {
+            id: "google-sat-layer",
+            type: "raster",
+            source: "google-sat",
+            minzoom: 0,
+            maxzoom: 22,
+          },
+        ],
+      };
+    }
+
+    if (mode === "HYBRID_ROADS") {
+      return {
+        version: 8,
+        sources: {
+          "google-hybrid": {
+            type: "raster",
+            tiles: [
+              "https://mt0.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+              "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+              "https://mt2.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+              "https://mt3.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+            ],
+            tileSize: 256,
+            maxzoom: 20,
+            attribution: "Google Hybrid (Satellite + Roads & Buildings)",
+          },
+        },
+        layers: [
+          {
+            id: "hybrid-layer",
+            type: "raster",
+            source: "google-hybrid",
+            minzoom: 0,
+            maxzoom: 22,
+          },
+        ],
+      };
+    }
+
+    if (mode === "ESRI_SAT_4K") {
       return {
         version: 8,
         sources: {
@@ -131,8 +199,8 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
               "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
             ],
             tileSize: 256,
-            attribution: "ESRI World Imagery, DigitalGlobe, Earthstar Geographics",
-            maxzoom: 19,
+            maxzoom: 18,
+            attribution: "ESRI World Imagery",
           },
         },
         layers: [
@@ -141,44 +209,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
             type: "raster",
             source: "esri-satellite",
             minzoom: 0,
-            maxzoom: 19,
-          },
-        ],
-      };
-    }
-
-    if (mode === "HYBRID") {
-      return {
-        version: 8,
-        sources: {
-          "esri-satellite": {
-            type: "raster",
-            tiles: [
-              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-            ],
-            tileSize: 256,
-          },
-          "osm-roads": {
-            type: "raster",
-            tiles: [
-              "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-            ],
-            tileSize: 256,
-          },
-        },
-        layers: [
-          {
-            id: "sat-base",
-            type: "raster",
-            source: "esri-satellite",
-          },
-          {
-            id: "roads-overlay",
-            type: "raster",
-            source: "osm-roads",
-            paint: {
-              "raster-opacity": 0.45,
-            },
+            maxzoom: 22,
           },
         ],
       };
@@ -194,6 +225,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
               "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
             ],
             tileSize: 256,
+            maxzoom: 19,
             attribution: "© OpenStreetMap contributors",
           },
         },
@@ -203,13 +235,13 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
             type: "raster",
             source: "osm-tiles",
             minzoom: 0,
-            maxzoom: 19,
+            maxzoom: 22,
           },
         ],
       };
     }
 
-    // TACTICAL DARK (Clean Gray / Dark without watermark)
+    // TACTICAL DARK (Clean military dark)
     return {
       version: 8,
       sources: {
@@ -219,6 +251,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
             "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
           ],
           tileSize: 256,
+          maxzoom: 18,
           attribution: "ESRI Dark Canvas",
         },
       },
@@ -228,13 +261,12 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
           type: "raster",
           source: "esri-dark",
           minzoom: 0,
-          maxzoom: 18,
+          maxzoom: 22,
         },
       ],
     };
   };
 
-  // Helper to create circle polygon GeoJSON for radar / SAM rings
   const createGeoJSONCircle = (center: [number, number], radiusInKm: number, points: number = 64) => {
     const coords: [number, number][] = [];
     const distanceX = radiusInKm / (111.32 * Math.cos((center[1] * Math.PI) / 180));
@@ -251,7 +283,41 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
   };
 
   const setupTacticalGeoJSONLayers = (map: maplibregl.Map) => {
-    // 1. Bangladesh ADIZ Boundary
+    // 1. Bangladesh Sovereign National Border (High-Contrast Glowing Boundary)
+    const sovereignBdBorder = [
+      [88.02, 26.63], [88.55, 26.40], [88.90, 26.30], [89.70, 26.10],
+      [89.85, 25.50], [90.50, 25.18], [91.80, 25.15], [92.40, 25.05],
+      [92.50, 24.80], [92.20, 24.20], [92.35, 23.80], [92.65, 23.70],
+      [92.40, 22.80], [92.60, 22.10], [92.40, 21.30], [92.30, 20.80],
+      [92.15, 20.55], // St. Martin / Naf River Frontier
+      [91.95, 21.45], [91.40, 22.20], [90.50, 21.90], [89.50, 21.70],
+      [89.15, 21.65], [88.90, 22.50], [88.80, 23.30], [88.60, 24.20],
+      [88.20, 24.80], [88.05, 25.20], [88.35, 25.80], [88.02, 26.63]
+    ];
+
+    if (!map.getSource("bd-sovereign-border")) {
+      map.addSource("bd-sovereign-border", {
+        type: "geojson",
+        data: {
+          type: "Feature",
+          properties: { name: "BANGLADESH SOVEREIGN BORDER" },
+          geometry: { type: "Polygon", coordinates: [sovereignBdBorder] },
+        },
+      });
+
+      map.addLayer({
+        id: "bd-border-glow",
+        type: "line",
+        source: "bd-sovereign-border",
+        paint: {
+          "line-color": "#00ff88",
+          "line-width": 3.5,
+          "line-opacity": 0.85,
+        },
+      });
+    }
+
+    // 2. Bangladesh ADIZ
     const adizCoords = [
       [87.5, 26.8],
       [89.0, 27.2],
@@ -270,10 +336,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         data: {
           type: "Feature",
           properties: { name: "BD ADIZ" },
-          geometry: {
-            type: "Polygon",
-            coordinates: [adizCoords],
-          },
+          geometry: { type: "Polygon", coordinates: [adizCoords] },
         },
       });
 
@@ -299,7 +362,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // 2. Maritime EEZ
+    // 3. Maritime EEZ
     const eezCoords = [
       [89.15, 21.65],
       [89.10, 19.20],
@@ -315,10 +378,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         data: {
           type: "Feature",
           properties: { name: "BD Maritime EEZ" },
-          geometry: {
-            type: "Polygon",
-            coordinates: [eezCoords],
-          },
+          geometry: { type: "Polygon", coordinates: [eezCoords] },
         },
       });
 
@@ -344,7 +404,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // 3. Radar & SAM Ranges
+    // 4. Radar & SAM Ranges
     const radarFeatures = defenseBases.map((base) => ({
       type: "Feature" as const,
       properties: { name: base.name, type: "RADAR", range: base.radarRangeKm },
@@ -409,15 +469,44 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       container: mapContainer.current,
       style: getStyleForMode(mapStyleMode),
       center: [90.3563, 23.6850],
-      zoom: 6.5,
-      pitch: 40,
+      zoom: 6.8,
+      pitch: 35,
       bearing: -4,
+      maxZoom: 21,
     });
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
 
     map.on("load", () => {
       setupTacticalGeoJSONLayers(map);
+    });
+
+    // Update Live Telemetry on movement
+    map.on("move", () => {
+      const center = map.getCenter();
+      const zoom = map.getZoom();
+      const pitch = map.getPitch();
+      const bearing = map.getBearing();
+
+      // Estimate eye elevation altitude in meters
+      const altitudeMeters = Math.round(40000000 / Math.pow(2, zoom));
+
+      let sectorName = "BANGLADESH NATIONAL AIRSPACE";
+      if (center.lat < 21.8 && center.lng > 91.0) sectorName = "BAY OF BENGAL / SE MARITIME SECTOR";
+      else if (center.lat > 24.5 && center.lng > 91.0) sectorName = "SYLHET / NE BORDER SECTOR";
+      else if (center.lat > 24.5 && center.lng < 89.5) sectorName = "RANGPUR / NORTHERN SECTOR";
+      else if (center.lat < 23.0 && center.lng < 90.0) sectorName = "KHULNA / MONGLA COASTAL SECTOR";
+      else if (center.lat >= 23.0 && center.lat <= 24.5) sectorName = "DHAKA CENTRAL DEFENSE CORRIDOR";
+
+      setCameraTelemetry({
+        lng: center.lng,
+        lat: center.lat,
+        zoom: Math.round(zoom * 10) / 10,
+        altitudeMeters,
+        pitch: Math.round(pitch),
+        bearing: Math.round(((bearing % 360) + 360) % 360),
+        sector: sectorName,
+      });
     });
 
     mapRef.current = map;
@@ -650,40 +739,51 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
 
   return (
     <div className="relative w-full h-full bg-[#020611] overflow-hidden">
-      {/* MapLibre Canvas Container */}
       <div ref={mapContainer} className="w-full h-full" />
 
-      {/* Realistic Map Mode Selector (Satellite 4K, Hybrid, Streets, Dark) */}
+      {/* Realistic Map Mode Selector */}
       <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 tactical-glass px-2 py-1.5 rounded-xl border border-cyan-500/40 text-xs font-mono flex items-center gap-1 shadow-2xl">
         <button
-          onClick={() => setMapStyleMode("SATELLITE_4K")}
+          onClick={() => setMapStyleMode("GOOGLE_SAT_HD")}
           className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all ${
-            mapStyleMode === "SATELLITE_4K"
+            mapStyleMode === "GOOGLE_SAT_HD"
               ? "bg-emerald-600 text-white font-bold shadow-md shadow-emerald-900"
               : "text-slate-400 hover:text-white hover:bg-slate-800/60"
           }`}
         >
           <SatIcon className="w-3.5 h-3.5" />
-          🛰️ REAL 4K SATELLITE
+          🛰️ SUB-METER SATELLITE (HD)
         </button>
 
         <button
-          onClick={() => setMapStyleMode("HYBRID")}
+          onClick={() => setMapStyleMode("HYBRID_ROADS")}
           className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all ${
-            mapStyleMode === "HYBRID"
+            mapStyleMode === "HYBRID_ROADS"
               ? "bg-cyan-600 text-white font-bold shadow-md shadow-cyan-900"
               : "text-slate-400 hover:text-white hover:bg-slate-800/60"
           }`}
         >
           <Globe className="w-3.5 h-3.5" />
-          HYBRID (ROADS)
+          HYBRID (SATELLITE + ROADS)
+        </button>
+
+        <button
+          onClick={() => setMapStyleMode("ESRI_SAT_4K")}
+          className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all ${
+            mapStyleMode === "ESRI_SAT_4K"
+              ? "bg-indigo-600 text-white font-bold shadow-md"
+              : "text-slate-400 hover:text-white hover:bg-slate-800/60"
+          }`}
+        >
+          <SatIcon className="w-3.5 h-3.5" />
+          ESRI 4K TERRAIN
         </button>
 
         <button
           onClick={() => setMapStyleMode("STREETS_TOPO")}
           className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all ${
             mapStyleMode === "STREETS_TOPO"
-              ? "bg-blue-600 text-white font-bold shadow-md shadow-blue-900"
+              ? "bg-blue-600 text-white font-bold shadow-md"
               : "text-slate-400 hover:text-white hover:bg-slate-800/60"
           }`}
         >
@@ -704,7 +804,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         </button>
       </div>
 
-      {/* Radar Sweep Animation Effect Overlay */}
+      {/* Radar Sweep Effect Overlay */}
       {layers.radarSweepAnim && (
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center overflow-hidden opacity-25">
           <div className="w-[880px] h-[880px] rounded-full border border-emerald-500/30 relative animate-radar-sweep">
@@ -713,16 +813,41 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         </div>
       )}
 
-      {/* Bottom Coordinates & Real-time Telemetry Badge */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 tactical-glass px-4 py-1.5 rounded-full border border-cyan-500/30 text-[11px] font-mono text-cyan-300 flex items-center gap-4 shadow-xl">
-        <span className="flex items-center gap-1.5 text-emerald-400">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-          60 FPS REAL-TIME TELEMETRY ACTIVE
-        </span>
-        <span className="w-1 h-3 bg-slate-700" />
-        <span>GRID: 23°41&apos;N 90°23&apos;E (DHAKA)</span>
-        <span className="w-1 h-3 bg-slate-700" />
-        <span className="text-amber-400">MGRS: 46R CK 382 284</span>
+      {/* LIVE MILITARY CAMERA & ELEVATION TELEMETRY HUD BAR (Bottom Center) */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 tactical-glass px-5 py-2 rounded-2xl border border-cyan-500/40 text-xs font-mono text-cyan-300 flex flex-wrap items-center gap-4 shadow-2xl backdrop-blur-xl">
+        <div className="flex items-center gap-2">
+          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+          <span className="font-bold text-emerald-400">{cameraTelemetry.sector}</span>
+        </div>
+
+        <span className="w-[1px] h-4 bg-slate-700" />
+
+        <div className="flex items-center gap-1.5 text-slate-200">
+          <Eye className="w-3.5 h-3.5 text-cyan-400" />
+          <span>ALT: <strong>{cameraTelemetry.altitudeMeters >= 1000 ? `${(cameraTelemetry.altitudeMeters / 1000).toFixed(1)} km` : `${cameraTelemetry.altitudeMeters} m`}</strong></span>
+        </div>
+
+        <span className="w-[1px] h-4 bg-slate-700" />
+
+        <div className="flex items-center gap-1.5 text-slate-200">
+          <Crosshair className="w-3.5 h-3.5 text-amber-400" />
+          <span>ZOOM: <strong>{cameraTelemetry.zoom}x</strong></span>
+        </div>
+
+        <span className="w-[1px] h-4 bg-slate-700" />
+
+        <div className="flex items-center gap-1.5 text-slate-200">
+          <Compass className="w-3.5 h-3.5 text-purple-400" />
+          <span>HDG: <strong>{cameraTelemetry.bearing}°</strong></span>
+          <span className="text-slate-500">|</span>
+          <span>TILT: <strong>{cameraTelemetry.pitch}°</strong></span>
+        </div>
+
+        <span className="w-[1px] h-4 bg-slate-700" />
+
+        <div className="text-slate-300">
+          LAT: <strong>{cameraTelemetry.lat.toFixed(4)}°N</strong> | LON: <strong>{cameraTelemetry.lng.toFixed(4)}°E</strong>
+        </div>
       </div>
     </div>
   );
