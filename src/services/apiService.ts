@@ -1,96 +1,97 @@
 import { FlightData, SatelliteData, ThreatAlert, VesselData, ThermalAnomaly } from "@/types/intelligence";
 import { INITIAL_FLIGHTS, INITIAL_SATELLITES, INITIAL_THERMAL_ANOMALIES, INITIAL_THREAT_ALERTS, INITIAL_VESSELS } from "./mockData";
 
-// Bounding box for Bangladesh and surrounding South Asia (lamin, lomin, lamax, lomax)
-const BD_BBOX = {
-  lamin: 19.5,
-  lomin: 87.0,
-  lamax: 27.5,
-  lomax: 93.5,
-};
+// Internal persistent vector store to guarantee 60fps aerodynamic smoothing without resetting loops
+let persistentFlightTracks: Map<string, FlightData> = new Map();
+let persistentVesselTracks: Map<string, VesselData> = new Map();
 
 export async function fetchLiveFlights(): Promise<FlightData[]> {
   try {
-    const url = `https://opensky-network.org/api/states/all?lamin=${BD_BBOX.lamin}&lomin=${BD_BBOX.lomin}&lamax=${BD_BBOX.lamax}&lomax=${BD_BBOX.lomax}`;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout
-
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
+    const res = await fetch("/api/defense/flights", {
+      cache: "no-store",
+    });
 
     if (res.ok) {
-      const data = await res.json();
-      if (data && data.states && Array.isArray(data.states)) {
-        const liveFlights: FlightData[] = data.states
-          .filter((s: any[]) => s[5] !== null && s[6] !== null) // valid lon, lat
-          .map((s: any[]) => {
-            const callsign = (s[1] || "UNIDENTIFIED").trim();
-            const isMil = callsign.startsWith("BAF") || callsign.startsWith("IAF") || callsign.startsWith("MAF") || s[8] === true;
-            return {
-              icao24: s[0] || "unknown",
-              callsign: callsign || "UNKNOWN",
-              origin_country: s[2] || "International",
-              longitude: s[5],
-              latitude: s[6],
-              baro_altitude: s[7] || 0,
-              velocity: s[9] || 0,
-              true_track: s[10] || 0,
-              vertical_rate: s[11] || 0,
-              squawk: s[14] || "---",
-              on_ground: s[8] || false,
-              category: isMil ? "MILITARY" : "COMMERCIAL",
-              threatLevel: isMil ? "ELEVATED" : "NORMAL",
-              lastContact: s[4] ? s[4] * 1000 : Date.now(),
-            };
-          });
-
-        if (liveFlights.length > 0) {
-          // Merge with specialized military tracks
-          return [...liveFlights, ...INITIAL_FLIGHTS.filter(f => f.category === 'MILITARY')];
-        }
+      const json = await res.json();
+      if (json && json.data && Array.isArray(json.data) && json.data.length > 0) {
+        // Update persistent track positions
+        json.data.forEach((f: FlightData) => {
+          persistentFlightTracks.set(f.icao24, f);
+        });
+        return json.data;
       }
     }
   } catch (err) {
-    console.warn("Live OpenSky API unavailable or rate-limited. Using tactical fallback stream:", err);
+    console.warn("Internal Flight API query fallback to continuous telemetry:", err);
   }
 
-  // Live simulation jitter on fallback flights to simulate real-time movement
-  return INITIAL_FLIGHTS.map((f) => {
-    const speedDeg = (f.velocity * 0.000005) || 0.0005;
+  // Smooth continuous progression if network fails
+  if (persistentFlightTracks.size === 0) {
+    INITIAL_FLIGHTS.forEach((f) => persistentFlightTracks.set(f.icao24, f));
+  }
+
+  const updated: FlightData[] = [];
+  persistentFlightTracks.forEach((f, key) => {
+    const speedDeg = (f.velocity * 0.0000035) || 0.00035;
     const rad = (f.true_track * Math.PI) / 180;
-    return {
+    const newLat = Number((f.latitude + Math.cos(rad) * speedDeg).toFixed(4));
+    const newLon = Number((f.longitude + Math.sin(rad) * speedDeg).toFixed(4));
+
+    const updatedFlight: FlightData = {
       ...f,
-      latitude: f.latitude + Math.cos(rad) * speedDeg,
-      longitude: f.longitude + Math.sin(rad) * speedDeg,
+      latitude: newLat,
+      longitude: newLon,
       lastContact: Date.now(),
     };
+    persistentFlightTracks.set(key, updatedFlight);
+    updated.push(updatedFlight);
   });
+
+  return updated;
 }
 
 export async function fetchLiveVessels(): Promise<VesselData[]> {
-  // Simulates realistic continuous vessel movement in Bay of Bengal
-  return INITIAL_VESSELS.map((v) => {
-    const speedDeg = (v.speed * 0.000003);
+  if (persistentVesselTracks.size === 0) {
+    INITIAL_VESSELS.forEach((v) => persistentVesselTracks.set(v.mmsi, v));
+  }
+
+  const updated: VesselData[] = [];
+  persistentVesselTracks.forEach((v, key) => {
+    const speedDeg = (v.speed * 0.000002) || 0.00002;
     const rad = (v.heading * Math.PI) / 180;
-    return {
+    const newLat = Number((v.latitude + Math.cos(rad) * speedDeg).toFixed(4));
+    const newLon = Number((v.longitude + Math.sin(rad) * speedDeg).toFixed(4));
+
+    const updatedVessel: VesselData = {
       ...v,
-      latitude: v.latitude + Math.cos(rad) * speedDeg,
-      longitude: v.longitude + Math.sin(rad) * speedDeg,
+      latitude: newLat,
+      longitude: newLon,
     };
+    persistentVesselTracks.set(key, updatedVessel);
+    updated.push(updatedVessel);
   });
+
+  return updated;
 }
 
 export async function fetchLiveSatellites(): Promise<SatelliteData[]> {
-  return INITIAL_SATELLITES.map((sat) => {
-    // Increment orbital position along orbit
-    const deltaLat = sat.type === 'COMMUNICATION' ? 0 : 0.02;
-    const deltaLon = sat.type === 'COMMUNICATION' ? 0 : 0.015;
-    return {
-      ...sat,
-      latitude: ((sat.latitude + deltaLat + 90) % 180) - 90,
-      longitude: ((sat.longitude + deltaLon + 180) % 360) - 180,
-    };
-  });
+  try {
+    const res = await fetch("/api/defense/satellites", {
+      cache: "no-store",
+    });
+
+    if (res.ok) {
+      const json = await res.json();
+      if (json && json.data && Array.isArray(json.data) && json.data.length > 0) {
+        return json.data;
+      }
+    }
+  } catch (err) {
+    console.warn("Satellite SGP4 API query fallback:", err);
+  }
+
+  // Fallback
+  return INITIAL_SATELLITES;
 }
 
 export async function fetchThermalAnomalies(): Promise<ThermalAnomaly[]> {
