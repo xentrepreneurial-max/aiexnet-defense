@@ -39,7 +39,7 @@ async function buildAnswer(query: string): Promise<Answer> {
   const aisStatus = getAisStatus();
 
   const provenance = [
-    `ADS-B: ${airDiag.linkState} (${tracks.length} contacts, sweep ${airDiag.sweepIntervalSec}s)`,
+    `ADS-B: ${airDiag.linkState} (${tracks.length} contacts, cycle ${airDiag.cycleLengthSec}s)`,
     `AIS: ${aisStatus.linkState} (${vessels.length} vessels)`,
   ];
 
@@ -51,14 +51,21 @@ async function buildAnswer(query: string): Promise<Answer> {
       headline: "SENSOR LINK STATUS",
       lines: [
         `ADS-B air picture: ${airDiag.linkState}, ${tracks.length} live contacts.`,
-        `Coverage sweep completes every ${airDiag.sweepIntervalSec}s across ${airDiag.coveragePoints.length} points.`,
+        `Cycle completes every ${airDiag.cycleLengthSec}s: ${airDiag.coverage.corePoints.length} core points every cycle, ${airDiag.coverage.extendedPerCycle} of ${airDiag.coverage.extendedPoints} extended points per cycle.`,
         ...airDiag.sources.map(
           (s) =>
             `  ${s.name}: ${
               s.lastOkAgeSec === null ? "never responded" : `last OK ${s.lastOkAgeSec}s ago`
             }${s.lastError ? ` — ${s.lastError}` : ""}`
         ),
+        `Global military sweep: ${
+          airDiag.lastMilSweepAgeSec === null
+            ? "not yet run"
+            : `${airDiag.lastMilSweepAgeSec}s ago, ${airDiag.militaryTracksLastSweep} in theatre`
+        }`,
         `AIS maritime: ${aisStatus.linkState}. ${aisStatus.message ?? "Receiving."}`,
+        "",
+        airDiag.coverage.note,
       ],
       provenance,
     };

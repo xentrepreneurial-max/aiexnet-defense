@@ -27,9 +27,11 @@ export async function GET() {
         air: {
           linkState: air.linkState,
           trackCount: air.trackCount,
-          sweepIntervalSec: air.sweepIntervalSec,
+          cycleLengthSec: air.cycleLengthSec,
           lastSweepAgeSec: air.lastSweepAgeSec,
-          coveragePoints: air.coveragePoints,
+          coverage: air.coverage,
+          militaryTracksLastSweep: air.militaryTracksLastSweep,
+          lastMilSweepAgeSec: air.lastMilSweepAgeSec,
           sources: air.sources,
         },
         sea: {

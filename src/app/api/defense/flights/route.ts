@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { ensurePollerRunning, getTracks, getFeedDiagnostics } from "@/lib/adsbStore";
+import { ensureRecorderRunning } from "@/lib/recorder";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -13,6 +14,7 @@ export const revalidate = 0;
  */
 export async function GET() {
   ensurePollerRunning();
+  ensureRecorderRunning();
 
   const tracks = getTracks();
   const diag = getFeedDiagnostics();
