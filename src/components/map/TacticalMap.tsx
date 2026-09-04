@@ -289,7 +289,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       [89.85, 25.50], [90.50, 25.18], [91.80, 25.15], [92.40, 25.05],
       [92.50, 24.80], [92.20, 24.20], [92.35, 23.80], [92.65, 23.70],
       [92.40, 22.80], [92.60, 22.10], [92.40, 21.30], [92.30, 20.80],
-      [92.15, 20.55], // St. Martin / Naf River Frontier
+      [92.15, 20.55],
       [91.95, 21.45], [91.40, 22.20], [90.50, 21.90], [89.50, 21.70],
       [89.15, 21.65], [88.90, 22.50], [88.80, 23.30], [88.60, 24.20],
       [88.20, 24.80], [88.05, 25.20], [88.35, 25.80], [88.02, 26.63]
@@ -461,7 +461,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     }
   };
 
-  // Initialize Map
   useEffect(() => {
     if (!mapContainer.current) return;
 
@@ -481,14 +480,12 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       setupTacticalGeoJSONLayers(map);
     });
 
-    // Update Live Telemetry on movement
     map.on("move", () => {
       const center = map.getCenter();
       const zoom = map.getZoom();
       const pitch = map.getPitch();
       const bearing = map.getBearing();
 
-      // Estimate eye elevation altitude in meters
       const altitudeMeters = Math.round(40000000 / Math.pow(2, zoom));
 
       let sectorName = "BANGLADESH NATIONAL AIRSPACE";
@@ -517,7 +514,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     };
   }, []);
 
-  // Update Style on mode change
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -527,7 +523,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     });
   }, [mapStyleMode]);
 
-  // Sync Layer Visibility
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !map.isStyleLoaded()) return;
@@ -548,7 +543,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     }
   }, [layers]);
 
-  // Handle Fly-To presets
   useEffect(() => {
     if (!mapRef.current || !flyToLocation) return;
     mapRef.current.flyTo({
@@ -560,14 +554,12 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     });
   }, [flyToLocation]);
 
-  // Render & Update Real-Time Moving Markers
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
     const currentMarkerIds = new Set<string>();
 
-    // 1. FLIGHT MARKERS (Live Moving)
     if (layers.showFlights) {
       liveFlights.forEach((f) => {
         const id = `flight-${f.icao24}`;
@@ -609,7 +601,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // 2. VESSEL MARKERS (Live Moving Ships)
     if (layers.showVessels) {
       liveVessels.forEach((v) => {
         const id = `vessel-${v.mmsi}`;
@@ -645,7 +636,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // 3. SATELLITES (Live Orbit)
     if (layers.showSatellites) {
       liveSatellites.forEach((s) => {
         const id = `sat-${s.id}`;
@@ -675,7 +665,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // 4. DEFENSE BASES
     if (layers.showDefenseBases) {
       defenseBases.forEach((b) => {
         const id = `base-${b.id}`;
@@ -703,7 +692,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // 5. THERMAL ANOMALIES
     if (layers.showThermal) {
       thermalAnomalies.forEach((th) => {
         const id = `thermal-${th.id}`;
@@ -728,7 +716,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // Clean up toggled off markers
     Object.keys(markersRef.current).forEach((key) => {
       if (!currentMarkerIds.has(key)) {
         markersRef.current[key].remove();
@@ -804,7 +791,6 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         </button>
       </div>
 
-      {/* Radar Sweep Effect Overlay */}
       {layers.radarSweepAnim && (
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center overflow-hidden opacity-25">
           <div className="w-[880px] h-[880px] rounded-full border border-emerald-500/30 relative animate-radar-sweep">
@@ -813,7 +799,7 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         </div>
       )}
 
-      {/* LIVE MILITARY CAMERA & ELEVATION TELEMETRY HUD BAR (Bottom Center) */}
+      {/* LIVE MILITARY CAMERA & ELEVATION TELEMETRY HUD BAR */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 tactical-glass px-5 py-2 rounded-2xl border border-cyan-500/40 text-xs font-mono text-cyan-300 flex flex-wrap items-center gap-4 shadow-2xl backdrop-blur-xl">
         <div className="flex items-center gap-2">
           <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
