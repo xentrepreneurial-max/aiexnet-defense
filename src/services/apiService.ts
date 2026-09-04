@@ -1,103 +1,56 @@
-import { FlightData, SatelliteData, ThreatAlert, VesselData, ThermalAnomaly } from "@/types/intelligence";
-import { INITIAL_FLIGHTS, INITIAL_SATELLITES, INITIAL_THERMAL_ANOMALIES, INITIAL_THREAT_ALERTS, INITIAL_VESSELS } from "./mockData";
+import {
+  FlightData,
+  SatelliteData,
+  ThreatAlert,
+  VesselData,
+  ThermalAnomaly,
+  FeedStatus,
+} from "@/types/intelligence";
 
-// Internal persistent vector store to guarantee 60fps aerodynamic smoothing without resetting loops
-let persistentFlightTracks: Map<string, FlightData> = new Map();
-let persistentVesselTracks: Map<string, VesselData> = new Map();
+/**
+ * Client-side feed access.
+ *
+ * These helpers never substitute synthetic data. If a feed is down the caller
+ * receives an empty array plus a FeedStatus explaining why, and the HUD shows
+ * that state instead of a comfortable-looking but false picture.
+ */
 
-export async function fetchLiveFlights(): Promise<FlightData[]> {
+export interface FeedResult<T> {
+  data: T[];
+  status: FeedStatus;
+}
+
+const OFFLINE_STATUS = (id: string, message: string): FeedStatus => ({
+  id,
+  linkState: "OFFLINE",
+  source: "UNREACHABLE",
+  count: 0,
+  lastUpdateAgeSec: null,
+  message,
+});
+
+async function getFeed<T>(path: string, id: string): Promise<FeedResult<T>> {
   try {
-    const res = await fetch("/api/defense/flights", {
-      cache: "no-store",
-    });
-
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.data && Array.isArray(json.data) && json.data.length > 0) {
-        // Update persistent track positions
-        json.data.forEach((f: FlightData) => {
-          persistentFlightTracks.set(f.icao24, f);
-        });
-        return json.data;
-      }
+    const res = await fetch(path, { cache: "no-store" });
+    if (!res.ok) {
+      return { data: [], status: OFFLINE_STATUS(id, `Server returned HTTP ${res.status}`) };
     }
-  } catch (err) {
-    console.warn("Internal Flight API query fallback to continuous telemetry:", err);
-  }
-
-  // Smooth continuous progression if network fails
-  if (persistentFlightTracks.size === 0) {
-    INITIAL_FLIGHTS.forEach((f) => persistentFlightTracks.set(f.icao24, f));
-  }
-
-  const updated: FlightData[] = [];
-  persistentFlightTracks.forEach((f, key) => {
-    const speedDeg = (f.velocity * 0.0000035) || 0.00035;
-    const rad = (f.true_track * Math.PI) / 180;
-    const newLat = Number((f.latitude + Math.cos(rad) * speedDeg).toFixed(4));
-    const newLon = Number((f.longitude + Math.sin(rad) * speedDeg).toFixed(4));
-
-    const updatedFlight: FlightData = {
-      ...f,
-      latitude: newLat,
-      longitude: newLon,
-      lastContact: Date.now(),
+    const json = await res.json();
+    const data: T[] = Array.isArray(json?.data) ? json.data : [];
+    const status: FeedStatus = json?.status ?? OFFLINE_STATUS(id, "No status reported");
+    return { data, status };
+  } catch (err: any) {
+    return {
+      data: [],
+      status: OFFLINE_STATUS(id, `Cannot reach local API: ${err?.message ?? err}`),
     };
-    persistentFlightTracks.set(key, updatedFlight);
-    updated.push(updatedFlight);
-  });
-
-  return updated;
-}
-
-export async function fetchLiveVessels(): Promise<VesselData[]> {
-  if (persistentVesselTracks.size === 0) {
-    INITIAL_VESSELS.forEach((v) => persistentVesselTracks.set(v.mmsi, v));
   }
-
-  const updated: VesselData[] = [];
-  persistentVesselTracks.forEach((v, key) => {
-    const speedDeg = (v.speed * 0.000002) || 0.00002;
-    const rad = (v.heading * Math.PI) / 180;
-    const newLat = Number((v.latitude + Math.cos(rad) * speedDeg).toFixed(4));
-    const newLon = Number((v.longitude + Math.sin(rad) * speedDeg).toFixed(4));
-
-    const updatedVessel: VesselData = {
-      ...v,
-      latitude: newLat,
-      longitude: newLon,
-    };
-    persistentVesselTracks.set(key, updatedVessel);
-    updated.push(updatedVessel);
-  });
-
-  return updated;
 }
 
-export async function fetchLiveSatellites(): Promise<SatelliteData[]> {
-  try {
-    const res = await fetch("/api/defense/satellites", {
-      cache: "no-store",
-    });
-
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.data && Array.isArray(json.data) && json.data.length > 0) {
-        return json.data;
-      }
-    }
-  } catch (err) {
-    console.warn("Satellite SGP4 API query fallback:", err);
-  }
-
-  // Fallback
-  return INITIAL_SATELLITES;
-}
-
-export async function fetchThermalAnomalies(): Promise<ThermalAnomaly[]> {
-  return INITIAL_THERMAL_ANOMALIES;
-}
-
-export async function fetchThreatAlerts(): Promise<ThreatAlert[]> {
-  return INITIAL_THREAT_ALERTS;
-}
+export const fetchLiveFlights = () => getFeed<FlightData>("/api/defense/flights", "AIR");
+export const fetchLiveVessels = () => getFeed<VesselData>("/api/defense/vessels", "SEA");
+export const fetchLiveSatellites = () =>
+  getFeed<SatelliteData>("/api/defense/satellites", "SPACE");
+export const fetchThermalAnomalies = () =>
+  getFeed<ThermalAnomaly>("/api/defense/thermal", "THERMAL");
+export const fetchThreatAlerts = () => getFeed<ThreatAlert>("/api/defense/alerts", "ALERTS");

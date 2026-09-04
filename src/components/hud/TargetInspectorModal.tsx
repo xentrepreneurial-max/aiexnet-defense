@@ -70,47 +70,115 @@ export const TargetInspectorModal: React.FC<TargetInspectorModalProps> = ({ targ
             <span className="text-slate-400">CALLSIGN:</span>
             <span className="text-emerald-400 font-bold text-sm">{target.data.callsign}</span>
           </div>
+
+          {/* Provenance banner: observed vs extrapolated. */}
+          <div
+            className={`flex items-center gap-1.5 p-1.5 rounded border text-[10px] ${
+              target.data.deadReckoned
+                ? "bg-amber-950/40 border-amber-600/40 text-amber-300"
+                : "bg-emerald-950/40 border-emerald-600/40 text-emerald-300"
+            }`}
+          >
+            <Activity className="w-3 h-3 flex-shrink-0" />
+            <span>
+              {target.data.deadReckoned
+                ? `DEAD RECKONED · last observed ${Math.round(target.data.coastAgeSec ?? 0)}s ago`
+                : "OBSERVED POSITION · direct ADS-B report"}
+            </span>
+          </div>
+
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
               <span className="text-[10px] text-slate-500 block">ICAO24:</span>
               <span className="text-cyan-300 font-bold">{target.data.icao24.toUpperCase()}</span>
             </div>
             <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
-              <span className="text-[10px] text-slate-500 block">COUNTRY:</span>
+              <span className="text-[10px] text-slate-500 block">REGISTRY:</span>
               <span className="text-slate-200">{target.data.origin_country}</span>
             </div>
             <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
+              <span className="text-[10px] text-slate-500 block">TAIL NUMBER:</span>
+              <span className="text-slate-200">{target.data.registration ?? "not in registry"}</span>
+            </div>
+            <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
+              <span className="text-[10px] text-slate-500 block">TYPE:</span>
+              <span className="text-slate-200">{target.data.aircraftType ?? "unknown"}</span>
+            </div>
+          </div>
+
+          <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
+            <span className="text-[10px] text-slate-500 block">AIRFRAME:</span>
+            <span className="text-slate-200">
+              {target.data.aircraftDesc ?? target.data.model ?? "No registry entry"}
+            </span>
+            {target.data.operator && (
+              <span className="block mt-0.5 text-[10px] text-cyan-300">
+                OPERATOR: {target.data.operator}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
               <span className="text-[10px] text-slate-500 block">ALTITUDE:</span>
-              <span className="text-cyan-300 font-bold">
-                {Math.round(target.data.baro_altitude)} m ({Math.round(target.data.baro_altitude * 3.28084)} ft)
+              <span className="text-slate-200">
+                {(target.data.altitudeFt ?? Math.round(target.data.baro_altitude * 3.28084)).toLocaleString()} ft
               </span>
             </div>
             <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
-              <span className="text-[10px] text-slate-500 block">AIRSPEED:</span>
-              <span className="text-cyan-300 font-bold">
-                {Math.round(target.data.velocity * 1.94384)} kts ({Math.round(target.data.velocity * 3.6)} km/h)
+              <span className="text-[10px] text-slate-500 block">GND SPEED:</span>
+              <span className="text-slate-200">
+                {target.data.groundSpeedKts ?? Math.round(target.data.velocity * 1.94384)} kt
               </span>
             </div>
             <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
-              <span className="text-[10px] text-slate-500 block">HEADING:</span>
-              <span className="text-emerald-400 font-bold">{Math.round(target.data.true_track)}°</span>
+              <span className="text-[10px] text-slate-500 block">TRACK:</span>
+              <span className="text-slate-200">{Math.round(target.data.true_track)}°</span>
+            </div>
+            <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
+              <span className="text-[10px] text-slate-500 block">V/S:</span>
+              <span className="text-slate-200">{target.data.verticalRateFpm ?? 0} fpm</span>
             </div>
             <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
               <span className="text-[10px] text-slate-500 block">SQUAWK:</span>
-              <span className={`font-bold ${target.data.squawk === '7700' ? 'text-red-400 animate-pulse' : 'text-slate-200'}`}>
-                {target.data.squawk || '---'}
+              <span className={target.data.emergency ? "text-red-400 font-bold" : "text-slate-200"}>
+                {target.data.squawk ?? "----"}
+              </span>
+            </div>
+            <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
+              <span className="text-[10px] text-slate-500 block">RSSI:</span>
+              <span className="text-slate-200">
+                {target.data.signalRssi != null ? `${target.data.signalRssi} dBFS` : "n/a"}
               </span>
             </div>
           </div>
-          <div className="flex items-center justify-between text-[11px] bg-slate-900/60 p-2 rounded">
-            <span className="text-slate-400">THREAT STATUS:</span>
-            <span className={`font-bold px-2 py-0.5 rounded text-[10px] ${
-              target.data.threatLevel === 'HIGH' ? 'bg-red-950 text-red-300 border border-red-500' :
-              target.data.threatLevel === 'ELEVATED' ? 'bg-amber-950 text-amber-300 border border-amber-500' :
-              'bg-emerald-950 text-emerald-300 border border-emerald-500'
-            }`}>
-              {target.data.threatLevel} ({target.data.category})
+
+          <div className="bg-slate-950/40 p-2 rounded border border-slate-800">
+            <span className="text-[10px] text-slate-500 block">POSITION:</span>
+            <span className="text-slate-200">
+              {target.data.latitude.toFixed(5)}°, {target.data.longitude.toFixed(5)}°
             </span>
+          </div>
+
+          {/* Why this track was classified as it was. */}
+          <div className="bg-slate-950/60 p-2 rounded border border-slate-800">
+            <span className="text-[10px] text-slate-500 flex items-center gap-1 mb-1">
+              <AlertOctagon className="w-3 h-3" />
+              CLASSIFICATION: <span className="text-slate-300 font-bold">{target.data.category}</span>
+              <span className="text-slate-600">/</span>
+              <span className="text-amber-300 font-bold">{target.data.threatLevel}</span>
+            </span>
+            {target.data.classificationBasis && target.data.classificationBasis.length > 0 ? (
+              <ul className="space-y-0.5">
+                {target.data.classificationBasis.map((b, i) => (
+                  <li key={i} className="text-[10px] text-slate-400 leading-snug">
+                    • {b}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="text-[10px] text-slate-500">No classification evidence recorded.</span>
+            )}
           </div>
         </div>
       )}

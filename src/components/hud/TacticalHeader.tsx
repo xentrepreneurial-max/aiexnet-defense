@@ -15,7 +15,7 @@ import {
   Globe2,
   MapPin
 } from "lucide-react";
-import { UserProfile } from "@/types/intelligence";
+import { FeedStatus, UserProfile } from "@/types/intelligence";
 
 interface TacticalHeaderProps {
   user: UserProfile;
@@ -25,6 +25,8 @@ interface TacticalHeaderProps {
   seaCount: number;
   satCount: number;
   thermalCount: number;
+  /** Live link state per feed — drives the header status indicator. */
+  feedStatus: Record<string, FeedStatus>;
   onFlyTo: (preset: 'BD_ALL' | 'BAY_OF_BENGAL' | 'DHAKA_AIR' | 'BORDER_SECTOR' | 'GLOBAL') => void;
   onLogout: () => void;
 }
@@ -37,6 +39,7 @@ export const TacticalHeader: React.FC<TacticalHeaderProps> = ({
   seaCount,
   satCount,
   thermalCount,
+  feedStatus,
   onFlyTo,
   onLogout,
 }) => {
@@ -55,6 +58,39 @@ export const TacticalHeader: React.FC<TacticalHeaderProps> = ({
     const timer = setInterval(updateClocks, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  /**
+   * Aggregate link state. The header must never read ONLINE while feeds are
+   * down — an operator glancing at it should see the true sensor state.
+   */
+  const linkSummary = () => {
+    const tracked = ["AIR", "SEA", "SPACE", "THERMAL"];
+    const present = tracked.map((id) => feedStatus[id]).filter(Boolean) as FeedStatus[];
+    if (present.length === 0) {
+      return { label: "INITIALISING", dot: "bg-slate-500", text: "text-slate-400", detail: "No feed has reported yet." };
+    }
+    const live = present.filter((s) => s.linkState === "LIVE");
+    const detail = present
+      .map((s) => `${s.id}: ${s.linkState}${s.count ? ` (${s.count})` : ""}`)
+      .join("  |  ");
+
+    if (live.length === present.length) {
+      return { label: `ALL FEEDS LIVE`, dot: "bg-emerald-400 animate-pulse", text: "text-emerald-400", detail };
+    }
+    if (live.length === 0) {
+      return { label: "NO SENSOR LINK", dot: "bg-red-500 animate-pulse", text: "text-red-400", detail };
+    }
+    return {
+      label: `${live.length}/${present.length} FEEDS LIVE`,
+      dot: "bg-amber-400 animate-pulse",
+      text: "text-amber-400",
+      detail,
+    };
+  };
+  const link = linkSummary();
+
+  const countTone = (id: string, live: string, dead: string) =>
+    feedStatus[id]?.linkState === "LIVE" ? live : dead;
 
   const getDefconColor = (lvl: number) => {
     switch (lvl) {
@@ -84,9 +120,11 @@ export const TacticalHeader: React.FC<TacticalHeaderProps> = ({
               </span>
             </div>
             <div className="text-[10px] text-slate-400 font-mono tracking-tight flex items-center gap-1.5">
-              <span>🇧🇩 BD MILITARY INTELLIGENCE</span>
-              <span className="w-1 h-1 rounded-full bg-emerald-400" />
-              <span className="text-emerald-400">ONLINE</span>
+              <span>🇧🇩 REGIONAL AIR / SEA / SPACE PICTURE</span>
+              <span className={`w-1 h-1 rounded-full ${link.dot}`} />
+              <span className={link.text} title={link.detail}>
+                {link.label}
+              </span>
             </div>
           </div>
         </div>
@@ -150,23 +188,35 @@ export const TacticalHeader: React.FC<TacticalHeaderProps> = ({
 
         {/* Live Counters */}
         <div className="flex items-center gap-3 text-xs bg-slate-900/60 border border-slate-700/60 px-3 py-1.5 rounded-lg">
-          <div className="flex items-center gap-1.5 text-cyan-300" title="Active Air Contacts">
+          <div
+            className={`flex items-center gap-1.5 ${countTone("AIR", "text-cyan-300", "text-slate-500 line-through decoration-red-500/60")}`}
+            title={feedStatus.AIR?.message ?? "Live ADS-B contacts"}
+          >
             <Plane className="w-3.5 h-3.5 text-cyan-400" />
             <span>{airCount} AIR</span>
           </div>
           <div className="w-[1px] h-3 bg-slate-700" />
-          <div className="flex items-center gap-1.5 text-emerald-300" title="Monitored Naval Vessels">
+          <div
+            className={`flex items-center gap-1.5 ${countTone("SEA", "text-emerald-300", "text-slate-500 line-through decoration-red-500/60")}`}
+            title={feedStatus.SEA?.message ?? "Live AIS vessel reports"}
+          >
             <Anchor className="w-3.5 h-3.5 text-emerald-400" />
             <span>{seaCount} SEA</span>
           </div>
           <div className="w-[1px] h-3 bg-slate-700" />
-          <div className="flex items-center gap-1.5 text-indigo-300" title="Active Satellites">
+          <div
+            className={`flex items-center gap-1.5 ${countTone("SPACE", "text-indigo-300", "text-slate-500 line-through decoration-red-500/60")}`}
+            title={feedStatus.SPACE?.message ?? "SGP4 propagated from live element sets"}
+          >
             <Satellite className="w-3.5 h-3.5 text-indigo-400" />
             <span>{satCount} SAT</span>
           </div>
           <div className="w-[1px] h-3 bg-slate-700" />
-          <div className="flex items-center gap-1.5 text-rose-300" title="Thermal Anomalies">
-            <Flame className="w-3.5 h-3.5 text-rose-400 animate-pulse" />
+          <div
+            className={`flex items-center gap-1.5 ${countTone("THERMAL", "text-rose-300", "text-slate-500 line-through decoration-red-500/60")}`}
+            title={feedStatus.THERMAL?.message ?? "NASA FIRMS active fire detections"}
+          >
+            <Flame className="w-3.5 h-3.5 text-rose-400" />
             <span>{thermalCount} FIRMS</span>
           </div>
         </div>

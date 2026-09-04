@@ -1,6 +1,17 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import * as satellite from "satellite.js";
+import { projectPosition } from "@/lib/airspace";
+
+/**
+ * How long a contact may be dead reckoned before we stop projecting it.
+ * ADS-B updates roughly every second in coverage, so a minute of silence
+ * means we genuinely do not know where the aircraft is any more.
+ */
+const COAST_LIMIT_SEC = 60;
+/** AIS reports are far sparser offshore, so vessels may coast longer. */
+const VESSEL_COAST_LIMIT_SEC = 600;
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { 
@@ -54,78 +65,141 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     sector: "BANGLADESH NATIONAL AIRSPACE",
   });
 
-  // Local state for smooth real-time interpolated movement
+  /**
+   * Display state.
+   *
+   * Between server polls, contacts are DEAD RECKONED: the last observed
+   * position is projected forward along the last observed course at the last
+   * observed ground speed, using real great-circle geometry. That is what a
+   * radar display does, and it is honest as long as it is bounded — so an
+   * extrapolated track is marked, and once the underlying observation ages
+   * past COAST_LIMIT_SEC we stop projecting and show the contact as stale
+   * rather than inventing continued motion.
+   *
+   * Satellites are not dead reckoned at all: the client runs SGP4 on the same
+   * element set the server used, so the displayed position is a real
+   * propagation at the current instant.
+   */
   const [liveFlights, setLiveFlights] = useState<FlightData[]>(initialFlights);
   const [liveVessels, setLiveVessels] = useState<VesselData[]>(initialVessels);
   const [liveSatellites, setLiveSatellites] = useState<SatelliteData[]>(initialSatellites);
 
+  // Last data actually received from the server, never mutated by animation.
+  const observedFlights = useRef<FlightData[]>(initialFlights);
+  const observedVessels = useRef<VesselData[]>(initialVessels);
+  const observedSats = useRef<SatelliteData[]>(initialSatellites);
+  const satrecCache = useRef<Record<string, satellite.SatRec>>({});
+  const thermalRef = useRef<ThermalAnomaly[]>(thermalAnomalies);
+  const onSelectTargetRef = useRef(onSelectTarget);
+
   useEffect(() => {
+    thermalRef.current = thermalAnomalies;
+  }, [thermalAnomalies]);
+
+  useEffect(() => {
+    onSelectTargetRef.current = onSelectTarget;
+  }, [onSelectTarget]);
+
+  useEffect(() => {
+    observedFlights.current = initialFlights;
     setLiveFlights(initialFlights);
   }, [initialFlights]);
 
   useEffect(() => {
+    observedVessels.current = initialVessels;
     setLiveVessels(initialVessels);
   }, [initialVessels]);
 
   useEffect(() => {
+    observedSats.current = initialSatellites;
     setLiveSatellites(initialSatellites);
   }, [initialSatellites]);
 
-  // High-performance 60FPS continuous movement animation loop
   useEffect(() => {
     let animationFrameId: number;
-    let lastTime = performance.now();
+    let lastRender = 0;
 
-    const animateMovement = (currentTime: number) => {
-      const deltaSec = (currentTime - lastTime) / 1000;
-      lastTime = currentTime;
+    const render = (nowMs: number) => {
+      // 10 Hz is smooth to the eye and leaves the main thread free for the map.
+      if (nowMs - lastRender > 100) {
+        lastRender = nowMs;
+        const now = Date.now();
 
-      if (deltaSec > 0 && deltaSec < 1) {
-        // 1. Move flights along heading (true_track)
-        setLiveFlights((prev) =>
-          prev.map((f) => {
-            const speedKts = f.velocity * 1.94384 || 250;
-            const distanceDeg = (speedKts * 0.000003) * deltaSec * 8;
-            const rad = (f.true_track * Math.PI) / 180;
+        setLiveFlights(
+          observedFlights.current.map((f) => {
+            const observedAt = f.positionTime ?? f.lastContact ?? now;
+            const ageSec = (now - observedAt) / 1000;
+
+            if (f.on_ground || ageSec <= 0 || ageSec > COAST_LIMIT_SEC || f.velocity <= 0) {
+              return { ...f, coastAgeSec: Math.max(0, ageSec), deadReckoned: false };
+            }
+
+            const distanceKm = (f.velocity * ageSec) / 1000;
+            const p = projectPosition(f.latitude, f.longitude, f.true_track, distanceKm);
             return {
               ...f,
-              latitude: f.latitude + Math.cos(rad) * distanceDeg,
-              longitude: f.longitude + (Math.sin(rad) * distanceDeg) / Math.cos((f.latitude * Math.PI) / 180),
+              latitude: p.lat,
+              longitude: p.lon,
+              coastAgeSec: ageSec,
+              deadReckoned: true,
             };
           })
         );
 
-        // 2. Move ships along heading
-        setLiveVessels((prev) =>
-          prev.map((v) => {
-            const distanceDeg = (v.speed * 0.000002) * deltaSec * 6;
-            const rad = (v.heading * Math.PI) / 180;
+        setLiveVessels(
+          observedVessels.current.map((v) => {
+            const observedAt = v.lastReport ?? now;
+            const ageSec = (now - observedAt) / 1000;
+
+            if (ageSec <= 0 || ageSec > VESSEL_COAST_LIMIT_SEC || v.speed <= 0.2) {
+              return { ...v, coastAgeSec: Math.max(0, ageSec), deadReckoned: false };
+            }
+
+            // Speed over ground is in knots: 1 kt = 1.852 km/h.
+            const distanceKm = (v.speed * 1.852 * ageSec) / 3600;
+            const p = projectPosition(v.latitude, v.longitude, v.heading, distanceKm);
             return {
               ...v,
-              latitude: v.latitude + Math.cos(rad) * distanceDeg,
-              longitude: v.longitude + (Math.sin(rad) * distanceDeg) / Math.cos((v.latitude * Math.PI) / 180),
+              latitude: p.lat,
+              longitude: p.lon,
+              coastAgeSec: ageSec,
+              deadReckoned: true,
             };
           })
         );
 
-        // 3. Move satellites in orbit
-        setLiveSatellites((prev) =>
-          prev.map((s) => {
-            if (s.type === "COMMUNICATION") return s;
-            const step = 0.015 * deltaSec * 3;
-            return {
-              ...s,
-              latitude: s.latitude > 85 ? -85 : s.latitude + step,
-              longitude: ((s.longitude + step * 0.8 + 180) % 360) - 180,
-            };
+        setLiveSatellites(
+          observedSats.current.map((s) => {
+            if (!s.tleLine1 || !s.tleLine2) return s;
+            try {
+              let rec = satrecCache.current[s.id];
+              if (!rec) {
+                rec = satellite.twoline2satrec(s.tleLine1, s.tleLine2);
+                satrecCache.current[s.id] = rec;
+              }
+              const when = new Date(now);
+              const pv = satellite.propagate(rec, when);
+              const posEci = pv?.position;
+              if (!posEci || typeof posEci === "boolean") return s;
+              const gmst = satellite.gstime(when);
+              const gd = satellite.eciToGeodetic(posEci, gmst);
+              return {
+                ...s,
+                latitude: satellite.degreesLat(gd.latitude),
+                longitude: satellite.degreesLong(gd.longitude),
+                altitude: Math.round(gd.height),
+              };
+            } catch {
+              return s;
+            }
           })
         );
       }
 
-      animationFrameId = requestAnimationFrame(animateMovement);
+      animationFrameId = requestAnimationFrame(render);
     };
 
-    animationFrameId = requestAnimationFrame(animateMovement);
+    animationFrameId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animationFrameId);
   }, []);
 
@@ -404,7 +478,136 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    // 4. Radar & SAM Ranges
+    // 4. Observed track history (trails). These are positions actually
+    //    reported by the contact — not a predicted or smoothed path.
+    if (!map.getSource("track-trails")) {
+      map.addSource("track-trails", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+
+      map.addLayer({
+        id: "track-trails-line",
+        type: "line",
+        source: "track-trails",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": [
+            "match",
+            ["get", "kind"],
+            "MILITARY", "#fb7185",
+            "CARGO", "#fbbf24",
+            "UNKNOWN", "#94a3b8",
+            "VESSEL", "#34d399",
+            "#22d3ee",
+          ],
+          "line-width": 1.6,
+          "line-opacity": 0.55,
+        },
+      });
+    }
+
+    // 5. Thermal anomalies. FIRMS can return thousands of detections in the
+    //    burning season, so these are drawn as a GPU layer sized by Fire
+    //    Radiative Power rather than as DOM markers.
+    if (!map.getSource("thermal-points")) {
+      map.addSource("thermal-points", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+
+      map.addLayer({
+        id: "thermal-points-glow",
+        type: "circle",
+        source: "thermal-points",
+        paint: {
+          "circle-radius": [
+            "interpolate", ["linear"], ["get", "frp"],
+            0, 5, 25, 9, 100, 15, 400, 24,
+          ],
+          "circle-color": [
+            "interpolate", ["linear"], ["get", "frp"],
+            0, "#fbbf24", 25, "#fb923c", 100, "#ef4444", 400, "#fca5a5",
+          ],
+          "circle-opacity": 0.28,
+          "circle-blur": 0.8,
+        },
+      });
+
+      map.addLayer({
+        id: "thermal-points-core",
+        type: "circle",
+        source: "thermal-points",
+        paint: {
+          "circle-radius": [
+            "interpolate", ["linear"], ["get", "frp"],
+            0, 2.2, 25, 3.4, 100, 5, 400, 7,
+          ],
+          "circle-color": [
+            "interpolate", ["linear"], ["get", "frp"],
+            0, "#fde68a", 25, "#fb923c", 100, "#dc2626", 400, "#fecaca",
+          ],
+          "circle-stroke-width": 0.6,
+          "circle-stroke-color": "#7f1d1d",
+        },
+      });
+    }
+
+    // 6. Maritime AIS contacts. Busy shipping lanes routinely carry thousands
+    //    of vessels, so these are also a GPU layer.
+    if (!map.getSource("vessel-points")) {
+      map.addSource("vessel-points", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+
+      map.addLayer({
+        id: "vessel-points-core",
+        type: "circle",
+        source: "vessel-points",
+        paint: {
+          "circle-radius": [
+            "match", ["get", "kind"],
+            "NAVAL", 6, "COAST_GUARD", 5.5, "SUBMARINE", 6,
+            "TANKER", 4.5, "CARGO", 4.5, 3.4,
+          ],
+          "circle-color": [
+            "match", ["get", "kind"],
+            "NAVAL", "#f43f5e",
+            "COAST_GUARD", "#f59e0b",
+            "SUBMARINE", "#a855f7",
+            "TANKER", "#38bdf8",
+            "CARGO", "#34d399",
+            "FISHING", "#94a3b8",
+            "#64748b",
+          ],
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "#022c22",
+          "circle-opacity": 0.92,
+        },
+      });
+
+      map.addLayer({
+        id: "vessel-points-heading",
+        type: "symbol",
+        source: "vessel-points",
+        layout: {
+          "icon-image": "",
+          "text-field": "▲",
+          "text-size": 11,
+          "text-rotate": ["get", "cog"],
+          "text-rotation-alignment": "map",
+          "text-allow-overlap": true,
+          "text-offset": [0, 0],
+        },
+        paint: {
+          "text-color": "#e2e8f0",
+          "text-opacity": 0.8,
+        },
+      });
+    }
+
+    // 7. Radar & SAM Ranges
     const radarFeatures = defenseBases.map((base) => ({
       type: "Feature" as const,
       properties: { name: base.name, type: "RADAR", range: base.radarRangeKm },
@@ -476,9 +679,53 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
 
+    /** GPU layers have no DOM element, so selection is bound to the layer. */
+    const bindLayerInteractions = () => {
+      const bind = (
+        layerId: string,
+        resolve: (props: Record<string, any>) => void
+      ) => {
+        map.on("click", layerId, (e) => {
+          const feature = e.features?.[0];
+          if (feature?.properties) resolve(feature.properties as Record<string, any>);
+        });
+        map.on("mouseenter", layerId, () => {
+          map.getCanvas().style.cursor = "pointer";
+        });
+        map.on("mouseleave", layerId, () => {
+          map.getCanvas().style.cursor = "";
+        });
+      };
+
+      bind("vessel-points-core", (props) => {
+        const v = observedVessels.current.find((x) => x.mmsi === props.mmsi);
+        if (v) onSelectTargetRef.current({ type: "VESSEL", data: v });
+      });
+
+      bind("thermal-points-core", (props) => {
+        const th = thermalRef.current.find((x) => x.id === props.id);
+        if (th) onSelectTargetRef.current({ type: "THERMAL", data: th });
+      });
+    };
+
     map.on("load", () => {
       setupTacticalGeoJSONLayers(map);
+      bindLayerInteractions();
     });
+
+    /**
+     * Progressive label detail. Full labels only once the operator is zoomed
+     * in enough for them to be readable; wide views keep the symbols.
+     */
+    const applyDeclutter = () => {
+      const container = map.getContainer();
+      const z = map.getZoom();
+      container.classList.remove("declutter-2", "declutter-3");
+      if (z < 6.0) container.classList.add("declutter-3");
+      else if (z < 7.5) container.classList.add("declutter-2");
+    };
+    map.on("zoom", applyDeclutter);
+    map.on("load", applyDeclutter);
 
     map.on("move", () => {
       const center = map.getCenter();
@@ -541,6 +788,19 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
     if (map.getLayer("sam-rings-line")) {
       map.setLayoutProperty("sam-rings-line", "visibility", layers.showMissileRings ? "visible" : "none");
     }
+    ["thermal-points-glow", "thermal-points-core"].forEach((id) => {
+      if (map.getLayer(id)) {
+        map.setLayoutProperty(id, "visibility", layers.showThermal ? "visible" : "none");
+      }
+    });
+    ["vessel-points-core", "vessel-points-heading"].forEach((id) => {
+      if (map.getLayer(id)) {
+        map.setLayoutProperty(id, "visibility", layers.showVessels ? "visible" : "none");
+      }
+    });
+    if (map.getLayer("track-trails-line")) {
+      map.setLayoutProperty("track-trails-line", "visibility", layers.showTrails ? "visible" : "none");
+    }
   }, [layers]);
 
   useEffect(() => {
@@ -565,74 +825,83 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
         const id = `flight-${f.icao24}`;
         currentMarkerIds.add(id);
 
-        let marker = markersRef.current[id];
-        const isMil = f.category === "MILITARY" || f.threatLevel === "HIGH";
+        const isMil = f.category === "MILITARY";
+        const isEmergency = Boolean(f.emergency);
+        const stale = (f.coastAgeSec ?? 0) > COAST_LIMIT_SEC;
 
+        // Colour encodes what the transponder actually told us, not a guess.
+        const tone = isEmergency
+          ? "bg-red-600/40 text-red-200 border-2 border-red-400 shadow-[0_0_18px_rgba(248,113,113,0.9)]"
+          : isMil
+          ? "bg-rose-600/30 text-rose-300 border-2 border-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.8)]"
+          : f.category === "CARGO"
+          ? "bg-amber-500/25 text-amber-200 border-2 border-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.5)]"
+          : f.category === "UNKNOWN"
+          ? "bg-slate-500/25 text-slate-200 border-2 border-slate-400"
+          : "bg-cyan-500/30 text-cyan-200 border-2 border-cyan-400 shadow-[0_0_12px_rgba(0,229,255,0.7)]";
+
+        const labelTone = isEmergency
+          ? "text-red-300"
+          : isMil
+          ? "text-rose-400"
+          : f.category === "CARGO"
+          ? "text-amber-300"
+          : f.category === "UNKNOWN"
+          ? "text-slate-300"
+          : "text-cyan-300";
+
+        const altFt = f.altitudeFt ?? Math.round(f.baro_altitude * 3.28084);
+        const subtitle = [
+          f.aircraftType || null,
+          `FL${String(Math.round(altFt / 100)).padStart(3, "0")}`,
+          `${f.groundSpeedKts ?? Math.round(f.velocity * 1.94384)}kt`,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+
+        const markup = `
+          <div class="relative flex items-center justify-center">
+            <div class="flight-arrow w-7 h-7 rounded-full ${tone} flex items-center justify-center font-bold text-xs transition-transform duration-200 hover:scale-125" style="transform: rotate(${f.true_track}deg);">
+              ▲
+            </div>
+            ${
+              isEmergency
+                ? '<div class="absolute -inset-1 rounded-full border-2 border-red-400 animate-ping pointer-events-none"></div>'
+                : ""
+            }
+          </div>
+          <div class="contact-label mt-0.5 px-1.5 py-0.5 rounded bg-slate-950/95 border border-slate-700 text-[10px] font-mono font-bold ${labelTone} whitespace-nowrap shadow-xl leading-tight text-center">
+            ${f.callsign}
+            <div class="contact-sublabel text-[8px] text-slate-400 font-normal">${subtitle}</div>
+          </div>
+        `;
+
+        let marker = markersRef.current[id];
         if (!marker) {
           const el = document.createElement("div");
           el.className = "cursor-pointer group flex flex-col items-center";
-          el.innerHTML = `
-            <div class="relative flex items-center justify-center">
-              <div class="flight-arrow w-7 h-7 rounded-full ${
-                isMil
-                  ? "bg-rose-600/30 text-rose-400 border-2 border-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.8)]"
-                  : "bg-cyan-500/30 text-cyan-300 border-2 border-cyan-400 shadow-[0_0_12px_rgba(0,229,255,0.7)]"
-              } flex items-center justify-center font-bold text-xs transition-transform duration-200 hover:scale-130" style="transform: rotate(${f.true_track}deg);">
-                ▲
-              </div>
-            </div>
-            <div class="mt-0.5 px-1.5 py-0.2 rounded bg-slate-950/95 border border-slate-700 text-[10px] font-mono font-bold ${
-              isMil ? "text-rose-400" : "text-cyan-300"
-            } whitespace-nowrap shadow-xl">
-              ${f.callsign} <span class="text-[8px] text-slate-400 font-normal">(${Math.round(f.baro_altitude)}m)</span>
-            </div>
-          `;
+          el.innerHTML = markup;
           el.onclick = () => onSelectTarget({ type: "FLIGHT", data: f });
-
           marker = new maplibregl.Marker({ element: el })
             .setLngLat([f.longitude, f.latitude])
             .addTo(map);
           markersRef.current[id] = marker;
         } else {
           marker.setLngLat([f.longitude, f.latitude]);
-          const arrowEl = marker.getElement().querySelector(".flight-arrow") as HTMLElement;
+          const el = marker.getElement();
+          const arrowEl = el.querySelector(".flight-arrow") as HTMLElement | null;
           if (arrowEl) arrowEl.style.transform = `rotate(${f.true_track}deg)`;
+          // Keep the click handler bound to the latest observation.
+          el.onclick = () => onSelectTarget({ type: "FLIGHT", data: f });
         }
-      });
-    }
 
-    if (layers.showVessels) {
-      liveVessels.forEach((v) => {
-        const id = `vessel-${v.mmsi}`;
-        currentMarkerIds.add(id);
-
-        let marker = markersRef.current[id];
-        const isNaval = v.type === "NAVAL" || v.type === "SUBMARINE";
-
-        if (!marker) {
-          const el = document.createElement("div");
-          el.className = "cursor-pointer group flex flex-col items-center";
-          el.innerHTML = `
-            <div class="w-6 h-6 rounded ${
-              isNaval
-                ? "bg-emerald-500/30 text-emerald-300 border-2 border-emerald-400 shadow-[0_0_12px_rgba(0,255,136,0.6)]"
-                : "bg-blue-500/30 text-blue-300 border-2 border-blue-400"
-            } flex items-center justify-center text-xs font-bold shadow-lg hover:scale-130 transition-transform" style="transform: rotate(${v.heading}deg);">
-              ◆
-            </div>
-            <div class="mt-0.5 px-1.5 py-0.2 rounded bg-slate-950/95 border border-slate-700 text-[9px] font-mono font-bold text-emerald-300 whitespace-nowrap shadow-xl">
-              ${v.name.split(" ")[0]}
-            </div>
-          `;
-          el.onclick = () => onSelectTarget({ type: "VESSEL", data: v });
-
-          marker = new maplibregl.Marker({ element: el })
-            .setLngLat([v.longitude, v.latitude])
-            .addTo(map);
-          markersRef.current[id] = marker;
-        } else {
-          marker.setLngLat([v.longitude, v.latitude]);
-        }
+        // A track we can no longer project is shown faded, never hidden.
+        marker.getElement().style.opacity = stale ? "0.4" : "1";
+        marker.getElement().title = stale
+          ? `NO POSITION UPDATE FOR ${Math.round(f.coastAgeSec ?? 0)}s — position is last known, not current`
+          : f.deadReckoned
+          ? `Dead reckoned ${Math.round(f.coastAgeSec ?? 0)}s from last observed position`
+          : "Observed position";
       });
     }
 
@@ -692,28 +961,79 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       });
     }
 
-    if (layers.showThermal) {
-      thermalAnomalies.forEach((th) => {
-        const id = `thermal-${th.id}`;
-        currentMarkerIds.add(id);
-
-        let marker = markersRef.current[id];
-        if (!marker) {
-          const el = document.createElement("div");
-          el.className = "cursor-pointer group flex flex-col items-center";
-          el.innerHTML = `
-            <div class="w-6 h-6 rounded-full bg-red-600/40 border-2 border-red-500 text-red-300 flex items-center justify-center text-xs animate-ping shadow-[0_0_12px_rgba(239,68,68,0.8)]">
-              🔥
-            </div>
-          `;
-          el.onclick = () => onSelectTarget({ type: "THERMAL", data: th });
-
-          marker = new maplibregl.Marker({ element: el })
-            .setLngLat([th.longitude, th.latitude])
-            .addTo(map);
-          markersRef.current[id] = marker;
-        }
+    // Maritime contacts.
+    const vesselSource = map.getSource("vessel-points") as maplibregl.GeoJSONSource | undefined;
+    if (vesselSource) {
+      vesselSource.setData({
+        type: "FeatureCollection",
+        features: layers.showVessels
+          ? liveVessels.map((v) => ({
+              type: "Feature" as const,
+              properties: {
+                mmsi: v.mmsi,
+                kind: v.type,
+                cog: v.heading,
+                name: v.name,
+                speed: v.speed,
+                flag: v.flag,
+              },
+              geometry: { type: "Point" as const, coordinates: [v.longitude, v.latitude] },
+            }))
+          : [],
       });
+    }
+
+    // Thermal detections.
+    const thermalSource = map.getSource("thermal-points") as maplibregl.GeoJSONSource | undefined;
+    if (thermalSource) {
+      thermalSource.setData({
+        type: "FeatureCollection",
+        features: layers.showThermal
+          ? thermalAnomalies.map((th) => ({
+              type: "Feature" as const,
+              properties: {
+                id: th.id,
+                frp: th.frp ?? 0,
+                brightness: th.brightness,
+                confidence: th.confidence,
+                satellite: th.satellite,
+                detectionTime: th.detectionTime,
+                area: th.areaDescription,
+              },
+              geometry: { type: "Point" as const, coordinates: [th.longitude, th.latitude] },
+            }))
+          : [],
+      });
+    }
+
+    // Push observed position history into the trail layer.
+    const trailSource = map.getSource("track-trails") as maplibregl.GeoJSONSource | undefined;
+    if (trailSource) {
+      const features: GeoJSON.Feature[] = [];
+
+      if (layers.showTrails && layers.showFlights) {
+        liveFlights.forEach((f) => {
+          if (!f.history || f.history.length < 2) return;
+          features.push({
+            type: "Feature",
+            properties: { kind: f.category, id: f.icao24 },
+            geometry: { type: "LineString", coordinates: f.history },
+          });
+        });
+      }
+
+      if (layers.showTrails && layers.showVessels) {
+        liveVessels.forEach((v) => {
+          if (!v.history || v.history.length < 2) return;
+          features.push({
+            type: "Feature",
+            properties: { kind: "VESSEL", id: v.mmsi },
+            geometry: { type: "LineString", coordinates: v.history },
+          });
+        });
+      }
+
+      trailSource.setData({ type: "FeatureCollection", features });
     }
 
     Object.keys(markersRef.current).forEach((key) => {

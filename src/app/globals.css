@@ -90,3 +90,39 @@ body {
 .maplibregl-ctrl-attrib {
   display: none !important;
 }
+
+/* ---------------------------------------------------------------------------
+   Label decluttering.
+
+   A real air picture is dense: at wide zoom the region carries hundreds of
+   contacts and full labels become an unreadable wall. These classes are
+   toggled from the map's zoom handler so detail appears as the operator
+   zooms in, the way a radar display does. Nothing is removed from the data —
+   only the label text is progressively hidden.
+--------------------------------------------------------------------------- */
+.declutter-2 .contact-sublabel {
+  display: none;
+}
+
+.declutter-3 .contact-sublabel {
+  display: none;
+}
+
+.declutter-3 .contact-label {
+  display: none;
+}
+
+/* Thin scrollbar for the HUD side column. */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(56, 189, 248, 0.25);
+  border-radius: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(56, 189, 248, 0.45);
+}

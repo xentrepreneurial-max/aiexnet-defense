@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { 
   Layers, 
   Plane, 
@@ -12,7 +12,9 @@ import {
   Target, 
   Compass, 
   Eye, 
-  EyeOff 
+  EyeOff,
+  ChevronDown,
+  ChevronUp
 } from "lucide-react";
 
 export interface LayerState {
@@ -25,6 +27,7 @@ export interface LayerState {
   showADIZ: boolean;
   showEEZ: boolean;
   showThermal: boolean;
+  showTrails: boolean;
   radarSweepAnim: boolean;
 }
 
@@ -101,6 +104,13 @@ export const LayerControlPanel: React.FC<LayerControlPanelProps> = ({
       description: "200 NM Exclusive Economic Zone",
     },
     {
+      key: "showTrails",
+      label: "Observed Track History",
+      icon: <Compass className="w-4 h-4" />,
+      color: "text-violet-400",
+      description: "Real reported positions, not predicted paths",
+    },
+    {
       key: "showThermal",
       label: "Thermal Anomalies (FIRMS)",
       icon: <Flame className="w-4 h-4" />,
@@ -109,17 +119,34 @@ export const LayerControlPanel: React.FC<LayerControlPanelProps> = ({
     },
   ];
 
+  const [expanded, setExpanded] = useState(true);
+  const activeCount = layerConfigs.filter(({ key }) => layers[key]).length;
+
   return (
-    <div className="tactical-glass rounded-xl border border-cyan-500/30 p-3.5 w-72 shadow-2xl select-none font-mono">
-      <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-700/60">
-        <div className="flex items-center gap-2 text-xs font-bold text-cyan-300">
+    <div className="tactical-glass rounded-xl border border-cyan-500/30 w-72 shadow-2xl select-none font-mono flex-shrink-0">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center justify-between px-3 py-2 border-b border-slate-700/60"
+      >
+        <span className="flex items-center gap-2 text-[11px] font-bold text-cyan-300">
           <Layers className="w-4 h-4 text-cyan-400" />
           INTELLIGENCE LAYERS
-        </div>
-        <span className="text-[10px] text-slate-400 uppercase">9 FEEDS</span>
-      </div>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="text-[10px] text-slate-400">
+            {activeCount}/{layerConfigs.length}
+          </span>
+          {expanded ? (
+            <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
+          ) : (
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+          )}
+        </span>
+      </button>
 
-      <div className="space-y-1.5 max-h-[calc(100vh-280px)] overflow-y-auto pr-1">
+      {expanded && (
+      <div className="p-3 pt-2">
+      <div className="space-y-1.5">
         {layerConfigs.map(({ key, label, icon, color, description }) => {
           const isActive = layers[key];
           return (
@@ -174,6 +201,8 @@ export const LayerControlPanel: React.FC<LayerControlPanelProps> = ({
           {layers.radarSweepAnim ? "ACTIVE" : "OFF"}
         </button>
       </div>
+      </div>
+      )}
     </div>
   );
 };
